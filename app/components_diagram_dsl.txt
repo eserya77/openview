@@ -1,0 +1,135 @@
+workspace "Sistema de Navegación Interior" "Aplicación móvil Android para guiado interior accesible mediante BLE, grafos y TTS." {
+
+    !identifiers hierarchical
+
+    model {
+        usuario = person "Persona con discapacidad visual" "Usuario principal que selecciona un destino y recibe guiado auditivo durante el recorrido."
+
+        sistema = softwareSystem "Sistema de navegación interior accesible" "Sistema móvil que estima ubicación interior, calcula rutas sobre un grafo y guía al usuario mediante audio." {
+
+            app = container "Aplicación móvil de navegación" "Aplicación Android nativa que gestiona interfaz accesible, BLE, rutas e instrucciones auditivas." "Kotlin / Android SDK" {
+                tags "MobileApp"
+
+                screen = component "NavigationScreen" "Interfaz accesible para seleccionar destino, iniciar navegación y mostrar estado." "Jetpack Compose / TalkBack"
+
+                viewModel = component "NavigationViewModel" "Orquesta el estado de navegación, destino seleccionado, ubicación estimada, ruta activa e instrucciones." "Android ViewModel"
+
+                localization = component "Módulo de localización BLE" "Escanea beacons BLE, procesa RSSI y estima la zona o nodo aproximado del usuario." "Bluetooth LE API / Kotlin"
+
+                navigationEngine = component "Motor de navegación" "Consulta el grafo, calcula rutas con A* y devuelve una secuencia de nodos." "GraphRepository + AStarRouter"
+
+                audioGuidance = component "Módulo de guiado auditivo" "Convierte la ruta en instrucciones y reproduce TTS nativo o audios locales para alertas críticas." "TextToSpeech / MediaPlayer"
+            }
+
+            storage = container "Almacenamiento local" "Guarda mapa, nodos, aristas, pesos, beacons, puntos de interés, configuración y audios locales." "Room / SQLite / JSON / Assets" {
+                tags "Database"
+            }
+        }
+
+        beacons = softwareSystem "BLE Beacons" "Balizas físicas instaladas en puntos estratégicos del entorno piloto para emitir señales BLE." {
+            tags "ExternalDevice"
+        }
+
+        androidOS = softwareSystem "Servicios Android OS" "Servicios nativos del dispositivo: Bluetooth LE, Text-to-Speech, TalkBack, permisos y vibración." {
+            tags "AndroidOS"
+        }
+
+        usuario -> sistema.app.screen "Interactúa con"
+
+        sistema.app.screen -> sistema.app.viewModel "Envía acciones y observa estado"
+        sistema.app.viewModel -> sistema.app.localization "Solicita ubicación aproximada"
+        sistema.app.localization -> beacons "Escanea señales BLE y RSSI"
+        sistema.app.localization -> sistema.app.viewModel "Reporta zona o nodo estimado"
+
+        sistema.app.viewModel -> sistema.app.navigationEngine "Solicita ruta origen-destino"
+        sistema.app.navigationEngine -> sistema.storage "Lee grafo, beacons y configuración"
+        sistema.app.navigationEngine -> sistema.app.viewModel "Devuelve ruta calculada"
+
+        sistema.app.viewModel -> sistema.app.audioGuidance "Solicita instrucciones o alertas"
+        sistema.app.audioGuidance -> androidOS "Usa TTS, MediaPlayer y vibración"
+        sistema.app.audioGuidance -> usuario "Reproduce guiado auditivo"
+    }
+
+    views {
+        component sistema.app "C4_03_Componentes_App_Android" {
+            include *
+            autolayout lr
+            title "Diagrama de componentes (C4 · Level 3)"
+        }
+
+        styles {
+            element "Person" {
+                shape person
+                background #0B3C6D
+                color #ffffff
+                stroke #0B3C6D
+            }
+
+            element "Software System" {
+                background #EAF3FA
+                color #1F2937
+                stroke #AFC7DA
+                strokeWidth 2
+                shape roundedbox
+            }
+
+            element "Container" {
+                background #DCEEFE
+                color #1F2937
+                stroke #7FAED6
+                strokeWidth 2
+                shape roundedbox
+            }
+
+            element "MobileApp" {
+                background #DCEEFE
+                color #1F2937
+                stroke #7FAED6
+                strokeWidth 2
+                shape roundedbox
+            }
+
+            element "Component" {
+                background #5B9BD5
+                color #ffffff
+                stroke #3F7FB8
+                strokeWidth 2
+                shape roundedbox
+            }
+
+            element "Database" {
+                background #D9E2EC
+                color #1F2937
+                stroke #94A3B8
+                strokeWidth 2
+                shape cylinder
+            }
+
+            element "ExternalDevice" {
+                background #BFDDF6
+                color #1F2937
+                stroke #7FAED6
+                strokeWidth 2
+                shape roundedbox
+            }
+
+            element "AndroidOS" {
+                background #E5E7EB
+                color #1F2937
+                stroke #9CA3AF
+                strokeWidth 2
+                shape roundedbox
+            }
+
+            relationship "Relationship" {
+                color #6B7280
+                thickness 2
+                routing direct
+            }
+        }
+    }
+
+    configuration {
+        scope softwaresystem
+    }
+}
