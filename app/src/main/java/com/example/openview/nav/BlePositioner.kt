@@ -26,7 +26,8 @@ class BlePositioner(private val alpha: Double = 0.4) {
     fun update(devices: List<BleDeviceInfo>): Result {
         val graph = ActiveGraph.graph
 
-        // Solo balizas conocidas del grafo (NAV_BLE_01/02/03).
+        // Solo balizas asignadas a nodos de la ruta activa. La cantidad no está
+        // fijada: el administrador puede configurar tres, seis o más.
         val targets = devices.filter { d ->
             d.name != null && graph.nodeForBeacon(d.name) != null
         }

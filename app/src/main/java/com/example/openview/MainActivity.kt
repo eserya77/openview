@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import com.example.openview.data.RouteRepository
 import com.example.openview.input.VolumeUpDispatcher
 import com.example.openview.ui.OpenViewApp
 import com.example.openview.ui.theme.OpenviewTheme
@@ -18,6 +19,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Carga las rutas y el estado de las balizas antes de mostrar la app.
+        RouteRepository.initialize(applicationContext)
         setContent {
             OpenviewTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->

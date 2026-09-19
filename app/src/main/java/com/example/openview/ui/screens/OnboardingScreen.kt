@@ -97,7 +97,7 @@ fun OnboardingScreen(
             onClick = onSimulator
         )
         SecondaryActionButton(
-            text = "Panel BLE (admin)",
+            text = "Panel de administración",
             icon = Icons.Filled.Bluetooth,
             onClick = onAdmin
         )

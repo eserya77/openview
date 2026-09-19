@@ -69,12 +69,18 @@ object GraphPresets {
  * la app sin tocar las balizas.
  */
 object ActiveGraph {
-    var preset: GraphPreset = GraphPresets.default
-        private set
+    /*
+     * Las formas siguen disponibles para las demostraciones, pero la navegación
+     * normal lee la ruta administrada por RouteRepository. Así, cambiar una
+     * baliza o activar una ruta desde el panel no exige recompilar la app.
+     */
+    private var previewPreset: GraphPreset? = null
 
-    val graph: NavGraph get() = preset.graph
-    val startNode: String get() = "inicio"
-    val destinationNode: String get() = "destino"
+    val preset: GraphPreset get() = previewPreset ?: GraphPresets.default
+    val graph: NavGraph get() = previewPreset?.graph ?: RouteRepository.activeGraph
+    val startNode: String get() = graph.nodes.firstOrNull()?.id ?: "inicio"
+    val destinationNode: String get() = graph.nodes.lastOrNull()?.id ?: "destino"
 
-    fun select(p: GraphPreset) { preset = p }
+    fun select(p: GraphPreset) { previewPreset = p }
+    fun useConfiguredRoute() { previewPreset = null }
 }
