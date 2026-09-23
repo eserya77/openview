@@ -1,6 +1,7 @@
 package com.example.openview.data
 
 import android.content.Context
+import com.example.openview.ble.RSSI_AT_ONE_METER
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,7 +22,12 @@ data class SavedRoute(
     }
 }
 
-data class ManagedBeacon(val name: String, val enabled: Boolean = true)
+/**
+ * [measuredPowerAt1m]: RSSI de referencia medido a 1 m para ESTA baliza en
+ * particular. `null` significa "usa la constante global" ([com.example.openview.ble.RSSI_AT_ONE_METER]),
+ * que es lo normal hasta que alguien la calibra a mano desde el panel admin.
+ */
+data class ManagedBeacon(val name: String, val enabled: Boolean = true, val measuredPowerAt1m: Int? = null)
 
 data class RouteCatalog(
     val routes: List<SavedRoute>,
@@ -120,6 +126,26 @@ object RouteRepository {
         catalog.copy(beacons = updated.sortedBy { it.name })
     }
 
+    /**
+     * RSSI de referencia a 1 m que debe usarse para ESTA baliza al estimar
+     * distancia: el suyo propio si alguien la calibró, o la constante global
+     * si no. Punto único de esta decisión: lo usan [com.example.openview.nav.BlePositioner]
+     * y el registro de calibración, para no divergir sobre qué número usar.
+     */
+    fun calibrationFor(beaconName: String): Int =
+        _catalog.value.beacons.firstOrNull { it.name == beaconName.uppercase() }?.measuredPowerAt1m
+            ?: RSSI_AT_ONE_METER
+
+    /** Guarda la referencia a 1 m calibrada a mano para una baliza. `null` vuelve a usar la global. */
+    fun setBeaconCalibration(name: String, measuredPowerAt1m: Int?) = updateCatalog { catalog ->
+        val normalized = name.uppercase()
+        val current = catalog.beacons
+        val updated = if (current.any { it.name == normalized }) {
+            current.map { if (it.name == normalized) it.copy(measuredPowerAt1m = measuredPowerAt1m) else it }
+        } else current + ManagedBeacon(normalized, measuredPowerAt1m = measuredPowerAt1m)
+        catalog.copy(beacons = updated.sortedBy { it.name })
+    }
+
     fun rememberBeacon(name: String) {
         val normalized = name.uppercase()
         if (!normalized.startsWith("NAV_BLE_")) return
@@ -171,7 +197,11 @@ object RouteRepository {
 
     private fun save(catalog: RouteCatalog) {
         val root = JSONObject().put("active", catalog.activeRouteId)
-        root.put("beacons", JSONArray().apply { catalog.beacons.forEach { put(JSONObject().put("name", it.name).put("enabled", it.enabled)) } })
+        root.put("beacons", JSONArray().apply {
+            catalog.beacons.forEach {
+                put(JSONObject().put("name", it.name).put("enabled", it.enabled).put("calibration", it.measuredPowerAt1m ?: JSONObject.NULL))
+            }
+        })
         root.put("routes", JSONArray().apply {
             catalog.routes.forEach { route -> put(JSONObject().apply {
                 put("id", route.id); put("name", route.name)
@@ -188,7 +218,13 @@ object RouteRepository {
     private fun load(): RouteCatalog? = runCatching {
         val raw = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null) ?: return null
         val root = JSONObject(raw)
-        val beacons = root.getJSONArray("beacons").mapObjects { ManagedBeacon(it.getString("name"), it.optBoolean("enabled", true)) }
+        val beacons = root.getJSONArray("beacons").mapObjects {
+            ManagedBeacon(
+                it.getString("name"),
+                it.optBoolean("enabled", true),
+                if (it.has("calibration") && !it.isNull("calibration")) it.getInt("calibration") else null
+            )
+        }
         val routes = root.getJSONArray("routes").mapObjects { obj ->
             val nodes = obj.getJSONArray("nodes").mapObjects { node -> NavNode(node.getString("id"), node.getString("label"), node.getDouble("x"), node.getDouble("y"), node.optString("beacon").ifBlank { null }, node.optBoolean("destination")) }
             val edges = obj.getJSONArray("edges").mapObjects { edge -> NavEdge(edge.getString("a"), edge.getString("b")) }

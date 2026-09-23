@@ -31,7 +31,24 @@ const val TARGET_SERVICE_UUID = "12345678-1234-1234-1234-123456789001"
 private const val DEVICE_TIMEOUT_MS = 10_000L
 
 /** RSSI de referencia medido aproximadamente a 1 metro para un ESP32 a P3 dBm. */
-private const val RSSI_AT_ONE_METER = -59
+const val RSSI_AT_ONE_METER = -59
+
+/**
+ * Estima la distancia en metros con el modelo log-distancia (n = 2).
+ *
+ * Punto único de esta fórmula: la usan [BleDeviceInfo.approxMeters], [com.example.openview.nav.BlePositioner]
+ * y el registro de calibración. Si algún día se ajusta [RSSI_AT_ONE_METER] o el exponente
+ * de pérdida de trayecto, basta con tocarlo aquí para que toda la app quede en sincronía.
+ *
+ * [referenceAt1m] permite usar la calibración propia de una baliza (ver
+ * `RouteRepository.calibrationFor`) en vez de la constante global; por
+ * defecto usa la global, así que el resto de la app no cambia si no la pasa.
+ */
+fun estimateMetersFromRssi(rssi: Int, referenceAt1m: Int = RSSI_AT_ONE_METER): Double {
+    if (rssi == 0) return -1.0
+    val ratio = (referenceAt1m - rssi) / (10.0 * 2.0)
+    return 10.0.pow(ratio)
+}
 
 /** Información de un dispositivo BLE detectado. */
 data class BleDeviceInfo(
@@ -43,30 +60,31 @@ data class BleDeviceInfo(
 ) {
     /** Estima la distancia en metros con el modelo log-distancia (n = 2). */
     val approxMeters: Double
-        get() {
-            if (rssi == 0) return -1.0
-            val ratio = (RSSI_AT_ONE_METER - rssi) / (10.0 * 2.0)
-            return 10.0.pow(ratio)
-        }
+        get() = estimateMetersFromRssi(rssi)
 
     /** Calidad de señal en 5 niveles (0 = nula, 4 = excelente). */
     val signalBars: Int
-        get() = when {
-            rssi >= -55 -> 4
-            rssi >= -67 -> 3
-            rssi >= -78 -> 2
-            rssi >= -90 -> 1
-            else -> 0
-        }
+        get() = signalBarsForRssi(rssi)
 
     val signalLabel: String
-        get() = when (signalBars) {
-            4 -> "Excelente"
-            3 -> "Buena"
-            2 -> "Regular"
-            1 -> "Débil"
-            else -> "Muy débil"
-        }
+        get() = signalLabelForBars(signalBars)
+}
+
+/** Calidad de señal en 5 niveles (0 = nula, 4 = excelente). Punto único: lo usa [BleDeviceInfo] y el mapa en vivo de calibración. */
+fun signalBarsForRssi(rssi: Int): Int = when {
+    rssi >= -55 -> 4
+    rssi >= -67 -> 3
+    rssi >= -78 -> 2
+    rssi >= -90 -> 1
+    else -> 0
+}
+
+fun signalLabelForBars(bars: Int): String = when (bars) {
+    4 -> "Excelente"
+    3 -> "Buena"
+    2 -> "Regular"
+    1 -> "Débil"
+    else -> "Muy débil"
 }
 
 /** Estado observable del escaneo BLE. */

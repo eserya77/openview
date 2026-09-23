@@ -12,10 +12,16 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.example.openview.ble.RSSI_AT_ONE_METER
+import com.example.openview.ble.estimateMetersFromRssi
 import com.example.openview.ble.hasBlePermissions
 import com.example.openview.ble.rememberBleScanner
+import com.example.openview.data.RouteRepository
 import com.example.openview.input.VolumeUpDispatcher
+import com.example.openview.logging.BleLogRow
+import com.example.openview.logging.BleSessionLogger
 import com.example.openview.nav.BlePositioner
+import com.example.openview.nav.LivePosition
 import com.example.openview.tts.rememberTtsController
 import com.example.openview.ui.screens.ActiveNavigationScreen
 import com.example.openview.ui.screens.AdminBleScreen
@@ -71,6 +77,47 @@ fun OpenViewApp(
     LaunchedEffect(bleState.devices) {
         val pos = positioner.update(bleState.devices)
         viewModel.onPositionUpdate(pos.nodeId, pos.beaconName, pos.signal)
+        LivePosition.update(pos)
+
+        // Registro de calibración: solo escribe si hay una sesión grabando (ver
+        // BleSessionLogger). No cambia nada del comportamiento de navegación.
+        if (BleSessionLogger.state.value.isRecording) {
+            val t = BleSessionLogger.elapsedSeconds()
+            val signalLabel = pos.signal.name.lowercase()
+            val fusedByName = pos.readings.associateBy { it.beaconName }
+            // Todas las balizas NAV_BLE_* visibles, estén o no asignadas al grafo
+            // activo: para calibrar necesitas ver también las que aún no usa ninguna ruta.
+            val visible = bleState.devices.filter { it.isTarget }
+
+            if (visible.isEmpty()) {
+                BleSessionLogger.log(
+                    BleLogRow(
+                        timestampS = t, beaconName = "_NONE_", rssiRaw = null, rssiSmoothed = null,
+                        estimatedDistanceM = null, computedXM = pos.computedX, computedYM = pos.computedY,
+                        detectedNodeId = pos.nodeId, signalState = signalLabel
+                    )
+                )
+            } else {
+                visible.forEach { device ->
+                    val label = device.name ?: device.address
+                    val fused = device.name?.let { fusedByName[it] }
+                    BleSessionLogger.log(
+                        BleLogRow(
+                            timestampS = t,
+                            beaconName = label,
+                            rssiRaw = device.rssi,
+                            rssiSmoothed = fused?.rssiSmoothed,
+                            estimatedDistanceM = fused?.estimatedDistanceM
+                                ?: estimateMetersFromRssi(device.rssi, device.name?.let { RouteRepository.calibrationFor(it) } ?: RSSI_AT_ONE_METER),
+                            computedXM = pos.computedX,
+                            computedYM = pos.computedY,
+                            detectedNodeId = pos.nodeId,
+                            signalState = signalLabel
+                        )
+                    )
+                }
+            }
+        }
     }
 
     NavHost(
