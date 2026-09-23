@@ -2,8 +2,10 @@ package com.example.openview.logging
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.SystemClock
 import androidx.core.content.FileProvider
+import com.example.openview.data.NavNode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,16 +16,14 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Una fila del registro crudo de una sesión de calibración BLE.
+ * Una fila del registro de una sesión de calibración BLE.
  *
- * El esquema de columnas es deliberadamente compatible con el que genera
- * `ble.py` (el simulador de datos de escritorio), para poder comparar una
- * prueba real con una simulada usando exactamente las mismas herramientas.
+ * Desde la v2 hay una fila por cada MUESTRA nueva de una baliza (antes había
+ * una por baliza en cada actualización de la lista, repitiendo valores viejos),
+ * más filas de evento: notas, llegadas/salidas del modo prueba guiado.
  *
- * [trueXM] / [trueYM] se llenan cuando, durante la grabación, se toca el mapa
- * de "verdad de terreno" (ver [markTruePosition]) para decir "estoy parado
- * aquí ahora". Se aplican solo a las lecturas del instante en que se tocó,
- * no a las que vienen después.
+ * Las 12 primeras columnas son las del formato v1 y de `ble.py`; las nuevas van
+ * detrás de `note` y [BleLogFile] lee ambos formatos.
  */
 data class BleLogRow(
     val timestampS: Double,
@@ -37,7 +37,21 @@ data class BleLogRow(
     val signalState: String,
     val trueXM: Double? = null,
     val trueYM: Double? = null,
-    val note: String = ""
+    val note: String = "",
+    // --- v2 ---
+    val event: String = MarkEvent.SAMPLE,
+    val trueNode: String? = null,
+    /** RSSI suavizado menos la referencia a 1 m de la baliza. */
+    val relDb: Double? = null,
+    val confidence: Double? = null,
+    val stableMs: Long? = null,
+    val fwVersion: Int? = null,
+    val txLevel: Int? = null,
+    /**
+     * true = fila de una muestra realmente nueva (log v2); null = no se sabe (log v1, con valores
+     * repetidos): el replay las deduce por cambio de valor. No se exporta como columna.
+     */
+    val sampleNew: Boolean? = true
 )
 
 data class BleSessionState(
@@ -49,7 +63,7 @@ data class BleSessionState(
 )
 
 /**
- * Graba en memoria cada lectura BLE (cruda y ya procesada) durante una sesión
+ * Graba en memoria cada muestra BLE (cruda y ya procesada) durante una sesión
  * de prueba, y la exporta como CSV.
  *
  * Es un observador puro: no decide nada de navegación ni toca el escáner o el
@@ -59,16 +73,16 @@ data class BleSessionState(
  */
 object BleSessionLogger {
 
-    private const val HEADER =
+    const val HEADER =
         "timestamp_s,beacon_name,rssi_raw,rssi_smoothed,estimated_distance_m," +
-            "computed_x_m,computed_y_m,detected_node_id,signal_state,true_x_m,true_y_m,note"
+            "computed_x_m,computed_y_m,detected_node_id,signal_state,true_x_m,true_y_m,note," +
+            "event,true_node,rel_db,confidence,stable_ms,fw_version,tx_level"
 
     private val rows = mutableListOf<BleLogRow>()
     private var sessionStartElapsedMs = 0L
 
-    // Verdad de terreno pendiente: se aplica a todas las filas del PRÓXIMO
-    // lote de lecturas (mismo timestamp_s) y luego se olvida, para no
-    // etiquetar con un punto viejo las lecturas de segundos después.
+    // Verdad de terreno "de un toque" del mapa (legado): se aplica a todas las filas del
+    // PRÓXIMO lote de lecturas (mismo timestamp_s) y luego se olvida.
     private var pendingTrue: Pair<Double, Double>? = null
     private var pendingBatchTimestamp: Double? = null
 
@@ -77,9 +91,8 @@ object BleSessionLogger {
 
     /**
      * Empieza una sesión nueva y descarta cualquier registro previo sin exportar.
-     * [conditions], si se llena, queda como la primera nota de la sesión
-     * ("puerta principal cerrada", "hora punta", etc.) — metadata que se te
-     * olvida anotar si no la pides al empezar.
+     * [conditions], si se llena, queda como una nota de la sesión. Siempre se anota
+     * el modelo de teléfono, porque el RSSI cambia de un teléfono a otro.
      */
     fun start(sessionName: String, conditions: String = "") {
         rows.clear()
@@ -93,6 +106,7 @@ object BleSessionLogger {
             trueMarkCount = 0,
             startedAtMs = System.currentTimeMillis()
         )
+        addNote("Teléfono: ${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})")
         if (conditions.isNotBlank()) {
             addNote("Condiciones iniciales: ${conditions.trim()}")
         }
@@ -103,15 +117,38 @@ object BleSessionLogger {
     }
 
     /**
-     * Marca "estoy físicamente parado aquí ahora mismo". Las coordenadas están
-     * en el mismo marco de metros que usa el grafo activo. Se aplica a las
-     * lecturas que lleguen a continuación, no a las pasadas.
+     * Marca "estoy físicamente parado aquí ahora mismo" tocando el mapa (modo antiguo).
+     * Aplica a las lecturas que lleguen a continuación, no a las pasadas.
+     * Para pruebas nuevas usa el modo guiado ([markNode]).
      */
     fun markTruePosition(x: Double, y: Double) {
         if (!_state.value.isRecording) return
         pendingTrue = x to y
         pendingBatchTimestamp = null
         _state.update { it.copy(trueMarkCount = it.trueMarkCount + 1) }
+    }
+
+    /**
+     * Marca de llegada o salida de un nodo del grafo. [lagS] > 0 corrige el retraso
+     * con que se tocó el botón ("llegué hace 5 s"): la marca queda en `ahora − lagS`.
+     * Devuelve el tiempo de sesión (s) al que quedó la marca.
+     */
+    fun markNode(kind: String, node: NavNode, lagS: Double = 0.0, label: String = node.label): Double {
+        val t = (elapsedSeconds() - lagS).coerceAtLeast(0.0)
+        if (!_state.value.isRecording) return t
+        val verb = if (kind == MarkEvent.ARRIVE) "LLEGUÉ" else "SALGO"
+        val lag = if (lagS > 0.0) " (hace ${"%.0f".format(Locale.US, lagS)} s)" else ""
+        rows.add(
+            BleLogRow(
+                timestampS = t, beaconName = "_MARK_", rssiRaw = null, rssiSmoothed = null,
+                estimatedDistanceM = null, computedXM = null, computedYM = null,
+                detectedNodeId = null, signalState = "-",
+                trueXM = node.x, trueYM = node.y, note = "$verb $label$lag",
+                event = kind, trueNode = node.id
+            )
+        )
+        _state.update { it.copy(rowCount = rows.size, trueMarkCount = it.trueMarkCount + if (kind == MarkEvent.ARRIVE) 1 else 0) }
+        return t
     }
 
     /** Agrega una lectura. No hace nada si no hay una sesión activa. */
@@ -135,26 +172,18 @@ object BleSessionLogger {
         _state.update { it.copy(rowCount = rows.size) }
     }
 
-    /**
-     * Inserta una fila especial solo con una nota de texto libre, con la marca
-     * de tiempo actual. Pensada para anotar contexto en el momento ("puerta
-     * abierta", "baliza 2 caída de la pared") que se te olvida si lo dejas
-     * para después.
-     */
+    /** Inserta una fila de nota de texto libre con la marca de tiempo actual. */
     fun addNote(note: String) {
         if (note.isBlank()) return
         log(
             BleLogRow(
                 timestampS = elapsedSeconds(),
                 beaconName = "_NOTE_",
-                rssiRaw = null,
-                rssiSmoothed = null,
-                estimatedDistanceM = null,
-                computedXM = null,
-                computedYM = null,
-                detectedNodeId = null,
+                rssiRaw = null, rssiSmoothed = null, estimatedDistanceM = null,
+                computedXM = null, computedYM = null, detectedNodeId = null,
                 signalState = "-",
-                note = note.trim()
+                note = note.trim(),
+                event = MarkEvent.NOTE
             )
         )
     }
@@ -163,11 +192,13 @@ object BleSessionLogger {
         if (sessionStartElapsedMs == 0L) 0.0
         else (SystemClock.elapsedRealtime() - sessionStartElapsedMs) / 1000.0
 
-    fun currentRows(): List<BleLogRow> = rows.toList()
+    /** Filas de la sesión ordenadas por tiempo y con la verdad de terreno rellenada según las marcas. */
+    fun currentRows(): List<BleLogRow> = GroundTruth.fill(rows.sortedBy { it.timestampS })
 
     /** Escribe el CSV en la caché de la app y abre el selector de "compartir" del sistema. */
     fun exportAndShare(context: Context) {
-        if (rows.isEmpty()) return
+        val export = currentRows()
+        if (export.isEmpty()) return
         val snapshot = _state.value
         val safeName = snapshot.sessionName.ifBlank { defaultName() }
             .replace(Regex("[^A-Za-z0-9_-]"), "_")
@@ -181,7 +212,7 @@ object BleSessionLogger {
             writer.write("sep=,\n")
             writer.write(HEADER)
             writer.write("\n")
-            rows.forEach { writer.write(toCsvLine(it)); writer.write("\n") }
+            export.forEach { writer.write(toCsvLine(it)); writer.write("\n") }
         }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val intent = Intent(Intent.ACTION_SEND).apply {
@@ -192,7 +223,7 @@ object BleSessionLogger {
         context.startActivity(Intent.createChooser(intent, "Exportar registro BLE"))
     }
 
-    private fun toCsvLine(r: BleLogRow): String {
+    fun toCsvLine(r: BleLogRow): String {
         fun num(v: Double?) = v?.let { "%.3f".format(Locale.US, it) } ?: ""
         fun int(v: Int?) = v?.toString() ?: ""
         fun quoted(v: String) =
@@ -210,7 +241,14 @@ object BleSessionLogger {
             r.signalState,
             num(r.trueXM),
             num(r.trueYM),
-            quoted(r.note)
+            quoted(r.note),
+            r.event,
+            r.trueNode ?: "",
+            num(r.relDb),
+            num(r.confidence),
+            r.stableMs?.toString() ?: "",
+            int(r.fwVersion),
+            int(r.txLevel)
         ).joinToString(",")
     }
 

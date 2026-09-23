@@ -3,12 +3,13 @@ package com.example.openview.logging
 import com.example.openview.data.BleSignal
 import com.example.openview.data.NavGraph
 import com.example.openview.nav.BlePositioner
+import com.example.openview.nav.TrackerParams
 import kotlin.math.hypot
 
 /**
- * Un instante del replay: lo que BlePositioner habría calculado en ese
- * momento con el `alpha` elegido, más la verdad de terreno si se marcó una
- * en ese instante (ver [BleSessionLogger.markTruePosition]).
+ * Un instante del replay: lo que [BlePositioner] habría calculado en ese
+ * momento con los parámetros elegidos, más la verdad de terreno si se conoce
+ * (marcas del modo guiado o toque en el mapa).
  */
 data class ReplayFrame(
     val timestampS: Double,
@@ -17,7 +18,9 @@ data class ReplayFrame(
     val nodeId: String?,
     val signal: BleSignal,
     val trueX: Double?,
-    val trueY: Double?
+    val trueY: Double?,
+    val trueNode: String? = null,
+    val stableMs: Long = 0L
 ) {
     /** Distancia en metros entre el punto estimado y la verdad marcada, si ambos existen. */
     val errorM: Double?
@@ -28,62 +31,60 @@ data class ReplayFrame(
 }
 
 /**
- * Vuelve a correr el suavizado (EMA) y la fusión de [BlePositioner] sobre un
- * log ya grabado — en memoria o cargado de un CSV exportado ([BleLogFile]) —
- * con un [alpha] distinto al que se usó al grabar. Sirve para responder
- * "¿y si hubiera usado alpha = 0.6?" sin caminar de nuevo el pasillo.
+ * Vuelve a correr el pipeline COMPLETO (filtro por baliza + calibración + NodeTracker)
+ * sobre un log ya grabado — en memoria o cargado de un CSV — con parámetros distintos
+ * a los usados al grabar. Responde "¿y si hubiera usado otra histéresis?" sin volver a caminar.
  *
- * Usa [BlePositioner.fuse], el mismo cálculo de centroide + nodo que la
- * navegación real, así el resultado es exactamente lo que la app habría
- * mostrado con ese alpha, no una aproximación aparte que se puede desviar.
+ * Usa el mismo [BlePositioner] que la navegación real, con un reloj inyectado a partir del
+ * `timestamp_s` del log, así el resultado es lo que la app habría mostrado, no una aproximación.
  *
- * Nota: asume que las balizas del log están asignadas a los mismos nodos que
- * en [graph] ahora mismo. Si el grafo activo cambió desde que se grabó la
- * prueba, el replay puede no coincidir con lo que se vio en su momento.
+ * Logs v1: cada fila repetía el último RSSI de cada baliza aunque no hubiera muestra nueva;
+ * aquí una lectura solo cuenta como muestra si su valor cambió respecto a la anterior de esa baliza.
+ * Logs v2: cada fila ES una muestra nueva.
+ *
+ * Nota: asume que las balizas del log están asignadas a los mismos nodos que en [graph] ahora mismo.
  */
 object ReplayEngine {
 
-    fun run(rows: List<BleLogRow>, alpha: Double, graph: NavGraph): List<ReplayFrame> {
+    fun run(
+        rows: List<BleLogRow>,
+        params: TrackerParams,
+        graph: NavGraph,
+        reference: (String) -> Int
+    ): List<ReplayFrame> {
         if (rows.isEmpty()) return emptyList()
 
-        val smoothed = mutableMapOf<String, Double>()
+        val filled = GroundTruth.fill(rows.sortedBy { it.timestampS })
+        val marks = GroundTruth.marksFrom(filled)
+        val positioner = BlePositioner(params, { graph }, reference)
+
+        val lastRaw = mutableMapOf<String, Int>()
         val frames = mutableListOf<ReplayFrame>()
 
-        // Solo filas con RSSI real (se descartan _NOTE_ y _NONE_) y cuya
-        // baliza esté asignada a un nodo del grafo actual.
-        val readingsByTimestamp = rows
-            .filter { it.rssiRaw != null && graph.nodeForBeacon(it.beaconName) != null }
-            .groupBy { it.timestampS }
-
-        // Las marcas de verdad de terreno pueden caer en el mismo instante que
-        // una fila _NONE_ (sin balizas visibles); se recogen aparte para no
-        // perderlas si ese instante no tiene lecturas de RSSI utilizables.
-        val truthByTimestamp = rows
-            .filter { it.trueXM != null && it.trueYM != null }
-            .associate { it.timestampS to (it.trueXM!! to it.trueYM!!) }
-
-        val allTimestamps = (readingsByTimestamp.keys + truthByTimestamp.keys).toSortedSet()
-
-        allTimestamps.forEach { t ->
-            val batch = readingsByTimestamp[t]
-            if (batch != null) {
-                // Olvida balizas que no aparecen en este instante, igual que BlePositioner.update.
-                val present = batch.map { it.beaconName }.toSet()
-                smoothed.keys.retainAll(present)
-                batch.forEach { row ->
-                    val rssi = row.rssiRaw ?: return@forEach
-                    val prev = smoothed[row.beaconName]
-                    smoothed[row.beaconName] = if (prev == null) rssi.toDouble() else alpha * rssi + (1 - alpha) * prev
-                }
+        filled.groupBy { it.timestampS }.toSortedMap().forEach { (t, batch) ->
+            val nowMs = (t * 1000.0).toLong()
+            var result: BlePositioner.Result? = null
+            batch.filter { it.rssiRaw != null && graph.nodeForBeacon(it.beaconName) != null }.forEach { row ->
+                val rssi = row.rssiRaw!!
+                val isNew = row.sampleNew ?: (lastRaw[row.beaconName] != rssi)
+                lastRaw[row.beaconName] = rssi
+                if (isNew) result = positioner.onSample(row.beaconName, rssi, nowMs)
             }
-            // Si 't' es un instante "solo verdad" (sin lote de RSSI, caso raro),
-            // se reutiliza el último estado suavizado en vez de vaciarlo.
+            val res = result ?: positioner.tick(nowMs)
 
-            val fusion = BlePositioner.fuse(smoothed, graph)
-            val truth = truthByTimestamp[t]
-            frames.add(ReplayFrame(t, fusion.computedX, fusion.computedY, fusion.nodeId, fusion.signal, truth?.first, truth?.second))
+            val rowTruth = batch.firstOrNull { it.trueXM != null && it.trueYM != null }
+            val truth = if (marks.isNotEmpty()) GroundTruth.truthAt(t, marks) else null
+            frames.add(
+                ReplayFrame(
+                    timestampS = t,
+                    computedX = res.computedX, computedY = res.computedY,
+                    nodeId = res.nodeId, signal = res.signal,
+                    trueX = truth?.x ?: rowTruth?.trueXM, trueY = truth?.y ?: rowTruth?.trueYM,
+                    trueNode = truth?.nodeId ?: rowTruth?.trueNode,
+                    stableMs = res.stableMs
+                )
+            )
         }
-
         return frames
     }
 }

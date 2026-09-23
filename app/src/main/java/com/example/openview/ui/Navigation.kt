@@ -1,5 +1,6 @@
 package com.example.openview.ui
 
+import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -12,14 +13,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.example.openview.ble.RSSI_AT_ONE_METER
 import com.example.openview.ble.estimateMetersFromRssi
 import com.example.openview.ble.hasBlePermissions
 import com.example.openview.ble.rememberBleScanner
+import com.example.openview.data.BleSignal
 import com.example.openview.data.RouteRepository
 import com.example.openview.input.VolumeUpDispatcher
 import com.example.openview.logging.BleLogRow
 import com.example.openview.logging.BleSessionLogger
+import com.example.openview.logging.MarkEvent
 import com.example.openview.nav.BlePositioner
 import com.example.openview.nav.LivePosition
 import com.example.openview.tts.rememberTtsController
@@ -34,6 +36,8 @@ import com.example.openview.ui.screens.OnboardingScreen
 import com.example.openview.ui.screens.RoutePreviewScreen
 import com.example.openview.ui.screens.SimulatorMenuScreen
 import com.example.openview.ui.screens.VoiceConfigScreen
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** Rutas de navegación del prototipo. */
 object Routes {
@@ -74,45 +78,69 @@ fun OpenViewApp(
     }
 
     // Convierte las señales BLE en posición (nodo del grafo) y la pasa al ViewModel.
-    LaunchedEffect(bleState.devices) {
-        val pos = positioner.update(bleState.devices)
-        viewModel.onPositionUpdate(pos.nodeId, pos.beaconName, pos.signal)
-        LivePosition.update(pos)
+    // Se alimenta por MUESTRAS (una por anuncio recibido) y por un reloj de 250 ms que hace
+    // caducar balizas y confirmar nodos por tiempo.
+    LaunchedEffect(bleScanner, positioner) {
+        var lastNode: String? = null
+        var lastSignal: BleSignal? = null
+        var lastBeacon: String? = null
+        var lastNoneLogMs = 0L
 
-        // Registro de calibración: solo escribe si hay una sesión grabando (ver
-        // BleSessionLogger). No cambia nada del comportamiento de navegación.
-        if (BleSessionLogger.state.value.isRecording) {
-            val t = BleSessionLogger.elapsedSeconds()
-            val signalLabel = pos.signal.name.lowercase()
-            val fusedByName = pos.readings.associateBy { it.beaconName }
-            // Todas las balizas NAV_BLE_* visibles, estén o no asignadas al grafo
-            // activo: para calibrar necesitas ver también las que aún no usa ninguna ruta.
-            val visible = bleState.devices.filter { it.isTarget }
+        fun publish(pos: BlePositioner.Result, force: Boolean) {
+            LivePosition.update(pos)
+            val changed = pos.nodeId != lastNode || pos.signal != lastSignal || pos.beaconName != lastBeacon
+            if (changed || force) {
+                lastNode = pos.nodeId; lastSignal = pos.signal; lastBeacon = pos.beaconName
+                viewModel.onPositionUpdate(pos.nodeId, pos.beaconName, pos.signal, pos.stableMs)
+            }
+        }
 
-            if (visible.isEmpty()) {
-                BleSessionLogger.log(
-                    BleLogRow(
-                        timestampS = t, beaconName = "_NONE_", rssiRaw = null, rssiSmoothed = null,
-                        estimatedDistanceM = null, computedXM = pos.computedX, computedYM = pos.computedY,
-                        detectedNodeId = pos.nodeId, signalState = signalLabel
-                    )
-                )
-            } else {
-                visible.forEach { device ->
-                    val label = device.name ?: device.address
-                    val fused = device.name?.let { fusedByName[it] }
+        launch {
+            bleScanner.samples.collect { sample ->
+                val pos = positioner.onSample(sample.name, sample.rssi, sample.tMs)
+                publish(pos, force = false)
+
+                // Registro de calibración: solo escribe si hay una sesión grabando (ver
+                // BleSessionLogger). No cambia nada del comportamiento de navegación.
+                if (BleSessionLogger.state.value.isRecording) {
+                    val reading = pos.readings.firstOrNull { it.beaconName == sample.name }
                     BleSessionLogger.log(
                         BleLogRow(
-                            timestampS = t,
-                            beaconName = label,
-                            rssiRaw = device.rssi,
-                            rssiSmoothed = fused?.rssiSmoothed,
-                            estimatedDistanceM = fused?.estimatedDistanceM
-                                ?: estimateMetersFromRssi(device.rssi, device.name?.let { RouteRepository.calibrationFor(it) } ?: RSSI_AT_ONE_METER),
+                            timestampS = BleSessionLogger.elapsedSeconds(),
+                            beaconName = sample.name,
+                            rssiRaw = sample.rssi,
+                            rssiSmoothed = reading?.rssiSmoothed,
+                            estimatedDistanceM = reading?.estimatedDistanceM
+                                ?: estimateMetersFromRssi(sample.rssi, RouteRepository.calibrationFor(sample.name)),
                             computedXM = pos.computedX,
                             computedYM = pos.computedY,
                             detectedNodeId = pos.nodeId,
-                            signalState = signalLabel
+                            signalState = pos.signal.name.lowercase(),
+                            relDb = reading?.relDb,
+                            confidence = pos.confidence,
+                            stableMs = pos.stableMs,
+                            fwVersion = sample.fwVersion,
+                            txLevel = sample.txLevel
+                        )
+                    )
+                }
+            }
+        }
+        launch {
+            while (true) {
+                delay(250)
+                val now = SystemClock.elapsedRealtime()
+                val pos = positioner.tick(now)
+                // El tick refresca el VM aunque nada cambie: así se cumple la espera de confirmación.
+                publish(pos, force = pos.nodeId != null)
+                if (pos.readings.isEmpty() && BleSessionLogger.state.value.isRecording && now - lastNoneLogMs >= 1_000L) {
+                    lastNoneLogMs = now
+                    BleSessionLogger.log(
+                        BleLogRow(
+                            timestampS = BleSessionLogger.elapsedSeconds(), beaconName = "_NONE_", rssiRaw = null,
+                            rssiSmoothed = null, estimatedDistanceM = null, computedXM = null, computedYM = null,
+                            detectedNodeId = pos.nodeId, signalState = pos.signal.name.lowercase(),
+                            event = MarkEvent.NONE
                         )
                     )
                 }

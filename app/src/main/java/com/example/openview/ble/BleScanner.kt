@@ -17,8 +17,12 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlin.math.pow
@@ -28,7 +32,10 @@ const val TARGET_BEACON_NAME = "NAV_BLE_01"
 const val TARGET_SERVICE_UUID = "12345678-1234-1234-1234-123456789001"
 
 /** Tiempo (ms) tras el cual un dispositivo se considera "perdido" si no se vuelve a ver. */
-private const val DEVICE_TIMEOUT_MS = 10_000L
+private const val DEVICE_TIMEOUT_MS = 4_000L
+
+/** Company ID de los datos de fabricante del firmware v2 (0xFFFF = uso interno). */
+private const val BEACON_COMPANY_ID = 0xFFFF
 
 /** RSSI de referencia medido aproximadamente a 1 metro para un ESP32 a P3 dBm. */
 const val RSSI_AT_ONE_METER = -59
@@ -50,13 +57,31 @@ fun estimateMetersFromRssi(rssi: Int, referenceAt1m: Int = RSSI_AT_ONE_METER): D
     return 10.0.pow(ratio)
 }
 
+/**
+ * Una muestra individual de RSSI: un anuncio recibido de una baliza. El positioner
+ * se alimenta de estos eventos (no de la lista de dispositivos), así cada valor
+ * entra al filtro una sola vez.
+ */
+data class BleSample(
+    val address: String,
+    val name: String,
+    val rssi: Int,
+    val tMs: Long,
+    /** Versión de firmware anunciada en los datos de fabricante (v2+), si existe. */
+    val fwVersion: Int? = null,
+    /** Nivel de potencia TX anunciado (0..7; 7 = +9 dBm), si existe. */
+    val txLevel: Int? = null
+)
+
 /** Información de un dispositivo BLE detectado. */
 data class BleDeviceInfo(
     val address: String,
     val name: String?,
     val rssi: Int,
     val lastSeenElapsedMs: Long,
-    val isTarget: Boolean
+    val isTarget: Boolean,
+    val fwVersion: Int? = null,
+    val txLevel: Int? = null
 ) {
     /** Estima la distancia en metros con el modelo log-distancia (n = 2). */
     val approxMeters: Double
@@ -117,6 +142,15 @@ class BleScanner(private val context: Context) {
 
     private val seen = mutableMapOf<String, BleDeviceInfo>()
 
+    // Nombre aprendido por dirección: con el firmware v2 el nombre viaja en el anuncio
+    // principal y el UUID en la respuesta de escaneo; según el teléfono, Android puede
+    // entregarlos como dos resultados separados y uno de ellos vendría sin nombre.
+    private val nameByAddress = mutableMapOf<String, String>()
+
+    private val _samples = MutableSharedFlow<BleSample>(extraBufferCapacity = 512, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    /** Un evento por cada anuncio recibido de una baliza NAV_BLE_*. */
+    val samples: SharedFlow<BleSample> = _samples.asSharedFlow()
+
     private val callback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = handleResult(result)
         override fun onBatchScanResults(results: MutableList<ScanResult>) = results.forEach(::handleResult)
@@ -128,22 +162,41 @@ class BleScanner(private val context: Context) {
     @SuppressLint("MissingPermission")
     private fun handleResult(result: ScanResult) {
         val record = result.scanRecord
-        val name = record?.deviceName ?: runCatching { result.device.name }.getOrNull()
+        val address = result.device.address
+        val advertisedName = record?.deviceName ?: runCatching { result.device.name }.getOrNull()
         val serviceUuids = record?.serviceUuids?.map { it.uuid.toString() } ?: emptyList()
+
+        // Datos de fabricante del firmware v2: [beaconId, fwVersion, txLevel].
+        val mfg = record?.getManufacturerSpecificData(BEACON_COMPANY_ID)
+        val beaconId = mfg?.getOrNull(0)?.toInt()?.takeIf { it in 1..99 }
+        val fwVersion = mfg?.getOrNull(1)?.toInt()
+        val txLevel = mfg?.getOrNull(2)?.toInt()
+
+        var name = advertisedName ?: nameByAddress[address] ?: beaconId?.let { "NAV_BLE_%02d".format(it) }
         // Reconoce cualquier baliza del piloto: NAV_BLE_01, NAV_BLE_02, NAV_BLE_03, ...
         val isTarget = (name?.startsWith("NAV_BLE_") == true) ||
-            serviceUuids.any { it.equals(TARGET_SERVICE_UUID, ignoreCase = true) }
+            serviceUuids.any { it.equals(TARGET_SERVICE_UUID, ignoreCase = true) } ||
+            (mfg != null && beaconId != null)
+        if (isTarget && name != null) nameByAddress[address] = name
+        if (name == null && isTarget) name = nameByAddress[address]
 
         val now = SystemClock.elapsedRealtime()
-        seen[result.device.address] = BleDeviceInfo(
-            address = result.device.address,
+        val previous = seen[address]
+        seen[address] = BleDeviceInfo(
+            address = address,
             name = name,
             rssi = result.rssi,
             lastSeenElapsedMs = now,
-            isTarget = isTarget
+            isTarget = isTarget,
+            fwVersion = fwVersion ?: previous?.fwVersion,
+            txLevel = txLevel ?: previous?.txLevel
         )
         // Elimina dispositivos no vistos recientemente para mantener la lista fresca.
         seen.entries.removeAll { now - it.value.lastSeenElapsedMs > DEVICE_TIMEOUT_MS }
+
+        if (isTarget && name != null) {
+            _samples.tryEmit(BleSample(address, name, result.rssi, now, fwVersion ?: previous?.fwVersion, txLevel ?: previous?.txLevel))
+        }
 
         val list = seen.values.sortedWith(
             compareByDescending<BleDeviceInfo> { it.isTarget }.thenByDescending { it.rssi }
@@ -164,6 +217,7 @@ class BleScanner(private val context: Context) {
         }
         scanner = adapter.bluetoothLeScanner
         seen.clear()
+        nameByAddress.clear()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()

@@ -136,6 +136,10 @@ object RouteRepository {
         _catalog.value.beacons.firstOrNull { it.name == beaconName.uppercase() }?.measuredPowerAt1m
             ?: RSSI_AT_ONE_METER
 
+    /** true si esta baliza ya tiene su propia referencia a 1 m (si no, se usa la global y su RSSI no es comparable con el de otras). */
+    fun isCalibrated(beaconName: String): Boolean =
+        _catalog.value.beacons.firstOrNull { it.name == beaconName.uppercase() }?.measuredPowerAt1m != null
+
     /** Guarda la referencia a 1 m calibrada a mano para una baliza. `null` vuelve a usar la global. */
     fun setBeaconCalibration(name: String, measuredPowerAt1m: Int?) = updateCatalog { catalog ->
         val normalized = name.uppercase()

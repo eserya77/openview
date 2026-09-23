@@ -97,6 +97,7 @@ import com.example.openview.logging.ReplayEngine
 import com.example.openview.logging.ReplayFrame
 import com.example.openview.nav.BlePositioner
 import com.example.openview.nav.LivePosition
+import com.example.openview.nav.TrackerParams
 import com.example.openview.ui.components.PrimaryActionButton
 import com.example.openview.ui.components.ScreenScaffold
 import com.example.openview.ui.components.ScreenTitle
@@ -104,11 +105,12 @@ import com.example.openview.ui.components.SecondaryActionButton
 import com.example.openview.ui.theme.FailureRed
 import com.example.openview.ui.theme.SuccessGreen
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 private const val PRESENT_WINDOW_MS = 5_000L
-private enum class AdminPage { HOME, ROUTES, BEACONS, EDITOR, REPLAY }
+private enum class AdminPage { HOME, ROUTES, BEACONS, EDITOR, REPLAY, GUIDED }
 
 /** Centro de control local de las rutas y balizas del edificio. */
 @Composable
@@ -128,10 +130,11 @@ fun AdminBleScreen(scanner: BleScanner, onBack: () -> Unit) {
     val startScan = { if (hasPermission) { scanner.refreshBluetoothState(); scanner.startScan() } else launcher.launch(requiredBlePermissions()) }
 
     when (page) {
-        AdminPage.HOME -> AdminHome(catalog.routes.firstOrNull { it.id == catalog.activeRouteId }, catalog.beacons.count { it.enabled }, catalog.beacons.size, { page = AdminPage.ROUTES }, { page = AdminPage.BEACONS }, { page = AdminPage.REPLAY }, onBack)
+        AdminPage.HOME -> AdminHome(catalog.routes.firstOrNull { it.id == catalog.activeRouteId }, catalog.beacons.count { it.enabled }, catalog.beacons.size, { page = AdminPage.ROUTES }, { page = AdminPage.BEACONS }, { page = AdminPage.REPLAY }, { page = AdminPage.GUIDED }, onBack)
         AdminPage.ROUTES -> RouteList(catalog.routes, catalog.activeRouteId, { page = AdminPage.HOME }, { id -> editingRouteId = id; page = AdminPage.EDITOR }, { id -> editingRouteId = id; page = AdminPage.EDITOR }, RouteRepository::activate)
         AdminPage.BEACONS -> BeaconInventory(catalog.beacons, scan.targets, scan.isScanning, scan.error, now, hasPermission, scanner, { page = AdminPage.HOME }, startScan, scanner::stopScan, RouteRepository::setBeaconEnabled)
         AdminPage.REPLAY -> ReplayScreen(onBack = { page = AdminPage.HOME })
+        AdminPage.GUIDED -> GuidedTestScreen(scanner, startScan, onBack = { page = AdminPage.HOME })
         AdminPage.EDITOR -> {
             val route = catalog.routes.firstOrNull { it.id == editingRouteId }
             if (route == null) page = AdminPage.ROUTES else RouteEditor(route, catalog.beacons, catalog.activeRouteId, { page = AdminPage.ROUTES }, RouteRepository::activate, RouteRepository::renameRoute, { RouteRepository.deleteRoute(it); page = AdminPage.ROUTES }, RouteRepository::addNode, RouteRepository::updateNode, RouteRepository::removeNode, RouteRepository::connect, RouteRepository::disconnect, RouteRepository.validate(route.id))
@@ -140,13 +143,14 @@ fun AdminBleScreen(scanner: BleScanner, onBack: () -> Unit) {
 }
 
 @Composable
-private fun AdminHome(active: SavedRoute?, usable: Int, total: Int, onRoutes: () -> Unit, onBeacons: () -> Unit, onReplay: () -> Unit, onBack: () -> Unit) {
+private fun AdminHome(active: SavedRoute?, usable: Int, total: Int, onRoutes: () -> Unit, onBeacons: () -> Unit, onReplay: () -> Unit, onGuided: () -> Unit, onBack: () -> Unit) {
     ScreenScaffold(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Spacer(Modifier.height(8.dp)); ScreenTitle("Administración")
         Text("Configura el espacio antes de guiar a una persona. Las rutas se guardan solo en este teléfono.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         AdminSummary("Ruta activa", active?.name ?: "Sin ruta", Icons.Filled.Route, SuccessGreen)
         AdminSummary("Balizas disponibles", "$usable de $total", Icons.Filled.Bluetooth, if (usable >= 3) SuccessGreen else FailureRed)
         PrimaryActionButton("Gestionar rutas", icon = Icons.Filled.Route, onClick = onRoutes)
+        PrimaryActionButton("Prueba guiada (recomendada)", icon = Icons.Filled.FiberManualRecord, onClick = onGuided)
         SecondaryActionButton("Probar y administrar balizas", icon = Icons.Filled.Radar, onClick = onBeacons)
         SecondaryActionButton("Replay y sandbox de calibración", icon = Icons.Filled.History, onClick = onReplay)
         Text("Primero prueba las balizas. Luego crea una ruta, agrega sus puntos y actívala cuando no tenga errores.", textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -511,7 +515,9 @@ private fun BeaconCard(beacon: ManagedBeacon, device: BleDeviceInfo?, present: B
                     Text(beacon.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     Text(when { !beacon.enabled -> "No se usará en rutas"; present && device != null -> "Detectada · ${device.rssi} dBm · ${device.signalLabel}"; else -> "No detectada en esta prueba" }, style = MaterialTheme.typography.bodyMedium, color = color)
                     Text(
-                        beacon.measuredPowerAt1m?.let { "Calibrada: $it dBm a 1 m" } ?: "Sin calibrar (usa la referencia global)",
+                        (beacon.measuredPowerAt1m?.let { "Calibrada: $it dBm a 1 m" } ?: "Sin calibrar (usa la referencia global)") +
+                            (device?.fwVersion?.let { " · firmware v$it" } ?: "") +
+                            (device?.txLevel?.let { " · TX ${-12 + 3 * it} dBm" } ?: ""),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -527,40 +533,47 @@ private fun BeaconCard(beacon: ManagedBeacon, device: BleDeviceInfo?, present: B
 }
 
 private enum class CalibrationPhase { READY, SAMPLING, DONE, FAILED }
-private const val CALIBRATION_SAMPLES = 15
-private const val CALIBRATION_INTERVAL_MS = 200L
+private const val CALIBRATION_SECONDS = 20
+private const val CALIBRATION_MIN_SAMPLES = 30
+private const val CALIBRATION_MAX_SD_DB = 4.0
 
 /**
- * Asistente "párate a 1 m y toca calibrar": promedia [CALIBRATION_SAMPLES] lecturas
- * de RSSI de una baliza específica (unos 3 s) y las guarda como su referencia
- * a 1 m ([ManagedBeacon.measuredPowerAt1m]), reemplazando la constante global
- * solo para esa baliza.
+ * Asistente "párate a 1 m y toca calibrar": recoge durante [CALIBRATION_SECONDS] s las MUESTRAS
+ * reales de una baliza específica (una por anuncio recibido, no una lectura repetida cada 200 ms),
+ * toma la MEDIANA y la guarda como su referencia a 1 m ([ManagedBeacon.measuredPowerAt1m]),
+ * reemplazando la constante global solo para esa baliza.
  *
- * Lee `scanner.state` como [androidx.compose.runtime.State] sin desestructurar
- * (no `by`), y llama a `.value` en cada muestra dentro del bucle: así el
- * [LaunchedEffect] ve lecturas realmente en vivo durante toda la medición, en
- * vez de quedarse con el valor de RSSI que había en el instante en que se
- * abrió el diálogo.
+ * La mediana no se deja arrastrar por picos aislados de ±10 dB, y si la desviación es alta
+ * (> [CALIBRATION_MAX_SD_DB] dB) avisa de que la medición fue inestable.
+ * También se puede calibrar todas de una vez con la Prueba guiada (paso "Guardar calibración").
  */
 @Composable
 private fun CalibrationDialog(scanner: BleScanner, beaconName: String, currentCalibration: Int?, onDismiss: () -> Unit, onSave: (Int) -> Unit) {
-    val scanState = scanner.state.collectAsState()
     var phase by remember { mutableStateOf(CalibrationPhase.READY) }
     var samples by remember { mutableStateOf(listOf<Int>()) }
     var collected by remember { mutableIntStateOf(0) }
+    var secondsLeft by remember { mutableIntStateOf(CALIBRATION_SECONDS) }
 
     LaunchedEffect(phase) {
         if (phase == CalibrationPhase.SAMPLING) {
             val readings = mutableListOf<Int>()
-            repeat(CALIBRATION_SAMPLES) {
-                scanState.value.targets.firstOrNull { it.name == beaconName }?.rssi?.let { readings.add(it) }
-                collected = readings.size
-                delay(CALIBRATION_INTERVAL_MS)
+            val job = launch {
+                scanner.samples.collect { if (it.name == beaconName) { readings.add(it.rssi); collected = readings.size } }
             }
-            samples = readings
-            phase = if (readings.isEmpty()) CalibrationPhase.FAILED else CalibrationPhase.DONE
+            val endAt = SystemClock.elapsedRealtime() + CALIBRATION_SECONDS * 1000L
+            while (SystemClock.elapsedRealtime() < endAt) {
+                secondsLeft = ((endAt - SystemClock.elapsedRealtime() + 999) / 1000).toInt()
+                delay(200)
+            }
+            job.cancel()
+            samples = readings.toList()
+            phase = if (readings.size < CALIBRATION_MIN_SAMPLES) CalibrationPhase.FAILED else CalibrationPhase.DONE
         }
     }
+
+    val sorted = samples.sorted()
+    val median = if (sorted.isEmpty()) 0 else sorted[sorted.size / 2]
+    val sd = if (samples.size < 2) 0.0 else kotlin.math.sqrt(samples.sumOf { (it - samples.average()) * (it - samples.average()) } / (samples.size - 1))
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -569,7 +582,7 @@ private fun CalibrationDialog(scanner: BleScanner, beaconName: String, currentCa
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 when (phase) {
                     CalibrationPhase.READY -> {
-                        Text("Párate exactamente a 1 metro de $beaconName, de frente, y mantente quieto unos segundos antes de empezar.")
+                        Text("Párate exactamente a 1 metro de $beaconName, con el móvil en la mano como lo llevarás normalmente, y mantente quieto durante $CALIBRATION_SECONDS segundos.")
                         currentCalibration?.let {
                             Text("Calibración actual: $it dBm a 1 m.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
@@ -578,27 +591,29 @@ private fun CalibrationDialog(scanner: BleScanner, beaconName: String, currentCa
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(10.dp))
-                            Text("Midiendo… no te muevas ($collected/$CALIBRATION_SAMPLES)")
+                            Text("Midiendo… no te muevas ($secondsLeft s · $collected muestras)")
                         }
                     }
                     CalibrationPhase.DONE -> {
-                        val avg = samples.average().roundToInt()
-                        Text("Nueva referencia: $avg dBm a 1 m, con ${samples.size} muestras.", fontWeight = FontWeight.Bold)
+                        Text("Nueva referencia: $median dBm a 1 m (mediana de ${samples.size} muestras, desviación ${"%.1f".format(sd)} dB).", fontWeight = FontWeight.Bold)
+                        if (sd > CALIBRATION_MAX_SD_DB) {
+                            Text("La medición fue inestable (desviación alta). Conviene repetirla sin moverte ni cambiar la orientación del móvil.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        }
                         currentCalibration?.let { Text("Antes: $it dBm.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         Text("Se aplicará solo a $beaconName; el resto de las balizas no cambian.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     CalibrationPhase.FAILED -> {
-                        Text("No se detectó $beaconName durante la medición.", color = MaterialTheme.colorScheme.error)
-                        Text("Confirma que esté encendida y que estés cerca, y vuelve a intentar.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Solo se recibieron ${samples.size} muestras de $beaconName (mínimo $CALIBRATION_MIN_SAMPLES).", color = MaterialTheme.colorScheme.error)
+                        Text("Confirma que esté encendida, que estés cerca y que el escaneo esté activo, y vuelve a intentar.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
         },
         confirmButton = {
             when (phase) {
-                CalibrationPhase.READY -> Button(onClick = { collected = 0; phase = CalibrationPhase.SAMPLING }) { Text("Empezar medición") }
+                CalibrationPhase.READY -> Button(onClick = { collected = 0; secondsLeft = CALIBRATION_SECONDS; phase = CalibrationPhase.SAMPLING }) { Text("Empezar medición") }
                 CalibrationPhase.SAMPLING -> {}
-                CalibrationPhase.DONE -> Button(onClick = { onSave(samples.average().roundToInt()) }) { Text("Guardar") }
+                CalibrationPhase.DONE -> Button(onClick = { onSave(median) }) { Text("Guardar") }
                 CalibrationPhase.FAILED -> Button(onClick = { phase = CalibrationPhase.READY }) { Text("Reintentar") }
             }
         },
@@ -675,7 +690,8 @@ private fun ReplayScreen(onBack: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var rows by remember { mutableStateOf<List<BleLogRow>>(emptyList()) }
     var sourceLabel by remember { mutableStateOf("") }
-    var alpha by remember { mutableFloatStateOf(0.4f) }
+    var alpha by remember { mutableFloatStateOf(0.5f) }
+    var margin by remember { mutableFloatStateOf(4f) }
     var frameIndex by remember { mutableIntStateOf(0) }
     var playing by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -695,8 +711,9 @@ private fun ReplayScreen(onBack: () -> Unit) {
     }
 
     val graph = ActiveGraph.graph
-    val frames = remember(rows, alpha) {
-        if (rows.isEmpty()) emptyList() else ReplayEngine.run(rows, alpha.toDouble(), graph)
+    val frames = remember(rows, alpha, margin) {
+        if (rows.isEmpty()) emptyList()
+        else ReplayEngine.run(rows, TrackerParams(alpha = alpha.toDouble(), marginDb = margin.toDouble()), graph, RouteRepository::calibrationFor)
     }
     LaunchedEffect(frames.size) { if (frameIndex >= frames.size) frameIndex = (frames.size - 1).coerceAtLeast(0) }
     LaunchedEffect(playing, frames.size) {
@@ -743,6 +760,11 @@ private fun ReplayScreen(onBack: () -> Unit) {
                 Text("Suavizado (alpha): ${"%.2f".format(alpha)}", style = MaterialTheme.typography.bodyMedium)
                 Text("Más bajo = más estable pero más lento para reaccionar. Más alto = más rápido pero más nervioso.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Slider(value = alpha, onValueChange = { alpha = it }, valueRange = 0.05f..0.95f)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Histéresis (margen para cambiar de nodo): ${"%.0f".format(margin)} dB", style = MaterialTheme.typography.bodyMedium)
+                Text("Más alto = el nodo cambia menos, pero tarda más en reaccionar. Usa la calibración por baliza guardada en este teléfono.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Slider(value = margin, onValueChange = { margin = it }, valueRange = 0f..12f)
             }
 
             ErrorSummary(frames)

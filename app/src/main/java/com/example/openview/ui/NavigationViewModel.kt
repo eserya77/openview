@@ -12,6 +12,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
+/** Tiempo mínimo que el nodo destino debe llevar confirmado para dar la llegada. */
+private const val ARRIVAL_HOLD_MS = 1_500L
+
+/** Tiempo mínimo fuera de ruta antes de recalcular con A*. */
+private const val OFF_ROUTE_HOLD_MS = 2_000L
+
 /** Estado global de la app de navegación (todo simulado). */
 data class NavigationUiState(
     val voiceSettings: VoiceSettings = VoiceSettings(),
@@ -135,8 +141,11 @@ class NavigationViewModel : ViewModel() {
      * Actualización de posición proveniente del [com.example.openview.nav.BlePositioner].
      * Avanza el paso según el nodo detectado, recalcula con A* si el usuario aparece
      * fuera de la ruta, y marca la llegada al alcanzar el destino.
+     *
+     * [stableMs] es cuánto lleva confirmado el nodo actual. Sin esa espera un solo cuadro
+     * en el nodo destino bastaba para declarar la llegada (o para recalcular la ruta).
      */
-    fun onPositionUpdate(nodeId: String?, beaconName: String?, signal: BleSignal) = _uiState.update { st ->
+    fun onPositionUpdate(nodeId: String?, beaconName: String?, signal: BleSignal, stableMs: Long = Long.MAX_VALUE) = _uiState.update { st ->
         if (st.isSimulationMode) return@update st
         val base = st.copy(
             bleSignal = signal,
@@ -148,7 +157,8 @@ class NavigationViewModel : ViewModel() {
 
         val idx = st.routePath.indexOf(nodeId)
         if (idx < 0) {
-            // Fuera de ruta: recalcular desde el nodo detectado.
+            // Fuera de ruta: recalcular solo si el nodo lleva un rato confirmado.
+            if (stableMs < OFF_ROUTE_HOLD_MS) return@update base
             val dest = st.selectedDestination ?: return@update base
             val newPath = RouteEngine.shortestPath(ActiveGraph.graph, nodeId, dest.id)
             return@update base.copy(
@@ -159,10 +169,10 @@ class NavigationViewModel : ViewModel() {
             )
         }
 
-        val arrived = idx >= st.routePath.lastIndex
+        val atDestination = idx >= st.routePath.lastIndex
         base.copy(
             currentStepIndex = idx.coerceAtMost(route.steps.lastIndex),
-            arrivedByBle = arrived
+            arrivedByBle = atDestination && stableMs >= ARRIVAL_HOLD_MS
         )
     }
 

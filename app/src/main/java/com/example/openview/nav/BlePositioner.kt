@@ -1,23 +1,35 @@
 package com.example.openview.nav
 
-import com.example.openview.ble.BleDeviceInfo
 import com.example.openview.ble.estimateMetersFromRssi
 import com.example.openview.data.ActiveGraph
 import com.example.openview.data.BleSignal
 import com.example.openview.data.NavGraph
 import com.example.openview.data.RouteRepository
 import kotlin.math.pow
+import kotlin.math.roundToInt
 
 /**
  * Estima en qué nodo del grafo está el usuario a partir de las señales BLE.
  *
- * Método: centroide ponderado por potencia de señal (RSSI suavizado con EMA) de
- * todas las balizas visibles, y luego "snap" al nodo más cercano del grafo.
- * Robusto con 1, 2 o 3 balizas y sin saltos al cambiar cuántas se ven.
+ * Pipeline (v2):
+ *  1. Cada muestra nueva de una baliza entra a su [BeaconFilter] (mediana + EMA).
+ *  2. El RSSI suavizado se compara contra la referencia a 1 m de ESA baliza
+ *     (calibración por baliza): así una baliza más "ruidosa" o más débil por
+ *     hardware no gana ni pierde por sí sola.
+ *  3. [NodeTracker] decide el nodo con histéresis y prior de vecinos del grafo.
+ *
+ * Se alimenta por muestras ([onSample]) y por un reloj ([tick]) que hace caducar
+ * las balizas que dejaron de oírse. No conoce Android: el reloj y la calibración
+ * se inyectan, lo que permite reproducir un log grabado con exactamente esta lógica.
  */
-class BlePositioner(private val alpha: Double = 0.4) {
+class BlePositioner(
+    val params: TrackerParams = TrackerParams(),
+    private val graphProvider: () -> NavGraph = { ActiveGraph.graph },
+    private val reference: (String) -> Int = { RouteRepository.calibrationFor(it) }
+) {
 
-    private val smoothed = mutableMapOf<String, Double>()
+    private val pipeline = SignalPipeline(params)
+    private val tracker = NodeTracker(params)
 
     /** Lectura individual de una baliza, cruda y ya procesada. Solo para diagnóstico/registro. */
     data class BeaconReading(
@@ -25,7 +37,9 @@ class BlePositioner(private val alpha: Double = 0.4) {
         val nodeId: String?,
         val rssiRaw: Int,
         val rssiSmoothed: Double,
-        val estimatedDistanceM: Double
+        val estimatedDistanceM: Double,
+        /** RSSI suavizado menos la referencia a 1 m de esta baliza (0 = a 1 m; más alto = más cerca). */
+        val relDb: Double
     )
 
     data class Result(
@@ -33,98 +47,90 @@ class BlePositioner(private val alpha: Double = 0.4) {
         val beaconName: String?,
         val rssi: Int?,
         val signal: BleSignal,
-        /** Centroide ponderado, en metros del grafo activo, antes del snap al nodo. Null si no hay balizas visibles. */
+        /** Centroide ponderado (con RSSI calibrado), en metros. Solo para dibujar el mapa de diagnóstico; NO decide el nodo. */
         val computedX: Double? = null,
         val computedY: Double? = null,
-        /** Una entrada por cada baliza del grafo activo que se ve ahora mismo. Vacía si ninguna coincide con el grafo. */
-        val readings: List<BeaconReading> = emptyList()
+        /** Una entrada por cada baliza del grafo activo que se oye ahora mismo. */
+        val readings: List<BeaconReading> = emptyList(),
+        /** Cuánto lleva confirmado el nodo actual. La navegación exige un mínimo para dar la llegada. */
+        val stableMs: Long = 0L,
+        /** 0..1: qué tan clara es la decisión. */
+        val confidence: Double = 0.0,
+        /** Ventaja en dB de la baliza más fuerte sobre la segunda. */
+        val marginDb: Double? = null
     )
 
-    /** Centroide + nodo detectado + calidad de señal, a partir de RSSI ya suavizado por baliza. */
-    data class Fusion(
-        val nodeId: String?,
-        val computedX: Double?,
-        val computedY: Double?,
-        val signal: BleSignal,
-        val strongestBeacon: String?,
-        val strongestRssi: Double?
-    )
-
-    companion object {
-        /**
-         * El corazón matemático del positioner, sin estado ni dependencia del
-         * escáner: centroide ponderado por potencia lineal (10^(rssi/10)) y
-         * "snap" al nodo más cercano del grafo. Recibe el RSSI YA suavizado.
-         *
-         * Vive aquí, y no solo dentro de [update], para que
-         * [com.example.openview.logging.ReplayEngine] pueda re-simular un log
-         * grabado con un `alpha` distinto usando exactamente esta misma
-         * fórmula — no una copia que se puede desincronizar.
-         */
-        fun fuse(smoothed: Map<String, Double>, graph: NavGraph): Fusion {
-            if (smoothed.isEmpty()) return Fusion(null, null, null, BleSignal.LOST, null, null)
-
-            var sumW = 0.0
-            var sumX = 0.0
-            var sumY = 0.0
-            smoothed.forEach { (name, rssi) ->
-                val node = graph.nodeForBeacon(name) ?: return@forEach
-                val w = 10.0.pow(rssi / 10.0)
-                sumW += w
-                sumX += w * node.x
-                sumY += w * node.y
-            }
-            val cx = if (sumW > 0) sumX / sumW else null
-            val cy = if (sumW > 0) sumY / sumW else null
-            val node = if (cx != null && cy != null) graph.nearestNode(cx, cy) else null
-
-            val best = smoothed.maxByOrNull { it.value }!!
-            val signal = when {
-                best.value >= -80 -> BleSignal.STABLE
-                best.value >= -92 -> BleSignal.WEAK
-                else -> BleSignal.LOST
-            }
-            return Fusion(node?.id, cx, cy, signal, best.key, best.value)
-        }
+    /** Procesa una muestra nueva de [beacon] y devuelve el estado resultante. */
+    fun onSample(beacon: String, rssi: Int, nowMs: Long): Result {
+        if (graphProvider().nodeForBeacon(beacon) != null) pipeline.onSample(beacon, rssi, nowMs)
+        return compute(nowMs)
     }
 
-    fun update(devices: List<BleDeviceInfo>): Result {
-        val graph = ActiveGraph.graph
+    /** Solo avanza el reloj (caducidad de balizas, confirmación por tiempo). */
+    fun tick(nowMs: Long): Result = compute(nowMs)
 
-        // Solo balizas asignadas a nodos de la ruta activa. La cantidad no está
-        // fijada: el administrador puede configurar tres, seis o más.
-        val targets = devices.filter { d ->
-            d.name != null && graph.nodeForBeacon(d.name) != null
+    fun reset() {
+        pipeline.reset()
+        tracker.reset()
+    }
+
+    private fun compute(nowMs: Long): Result {
+        val graph = graphProvider()
+        val smoothed = pipeline.smoothedAt(nowMs).filterKeys { graph.nodeForBeacon(it) != null }
+        if (smoothed.isEmpty()) {
+            tracker.update(emptyMap(), graph, nowMs)
+            return Result(null, null, null, BleSignal.LOST)
         }
 
-        // Suaviza el RSSI por baliza y olvida las que ya no se ven.
-        val present = targets.mapNotNull { it.name }.toSet()
-        smoothed.keys.retainAll(present)
-        targets.forEach { d ->
-            val name = d.name!!
-            val prev = smoothed[name]
-            smoothed[name] = if (prev == null) d.rssi.toDouble() else alpha * d.rssi + (1 - alpha) * prev
-        }
+        val rel = smoothed.mapValues { (name, s) -> s - reference(name) }
+        val decision = tracker.update(rel, graph, nowMs)
 
-        // Lecturas por baliza para diagnóstico/registro (no afecta la navegación).
-        val readings = targets.mapNotNull { d ->
-            val name = d.name ?: return@mapNotNull null
+        val readings = smoothed.map { (name, s) ->
             BeaconReading(
                 beaconName = name,
                 nodeId = graph.nodeForBeacon(name)?.id,
-                rssiRaw = d.rssi,
-                rssiSmoothed = smoothed[name] ?: d.rssi.toDouble(),
-                estimatedDistanceM = estimateMetersFromRssi(d.rssi, RouteRepository.calibrationFor(name))
+                rssiRaw = pipeline.lastRaw(name) ?: s.roundToInt(),
+                rssiSmoothed = s,
+                estimatedDistanceM = estimateMetersFromRssi(s.roundToInt(), reference(name)).coerceAtMost(MAX_DISTANCE_M),
+                relDb = rel.getValue(name)
             )
         }
 
-        if (smoothed.isEmpty()) {
-            return Result(null, null, null, BleSignal.LOST, readings = readings)
+        // Señal por RSSI absoluto de la baliza más fuerte (misma regla que la v1).
+        val strongestAbs = smoothed.maxOf { it.value }
+        val signal = when {
+            strongestAbs >= -80 -> BleSignal.STABLE
+            strongestAbs >= -92 -> BleSignal.WEAK
+            else -> BleSignal.LOST
         }
 
-        val fusion = fuse(smoothed, graph)
-        return Result(fusion.nodeId, fusion.strongestBeacon, fusion.strongestRssi?.toInt(), fusion.signal, fusion.computedX, fusion.computedY, readings)
+        val (cx, cy) = centroid(rel, graph)
+        val best = decision.bestBeacon
+        return Result(
+            nodeId = decision.nodeId,
+            beaconName = best,
+            rssi = best?.let { smoothed[it]?.roundToInt() },
+            signal = signal,
+            computedX = cx,
+            computedY = cy,
+            readings = readings,
+            stableMs = decision.stableMs,
+            confidence = decision.confidence,
+            marginDb = decision.marginDb
+        )
     }
 
-    fun reset() = smoothed.clear()
+    private fun centroid(rel: Map<String, Double>, graph: NavGraph): Pair<Double?, Double?> {
+        var sumW = 0.0; var sumX = 0.0; var sumY = 0.0
+        rel.forEach { (name, r) ->
+            val node = graph.nodeForBeacon(name) ?: return@forEach
+            val w = 10.0.pow(r / 10.0)
+            sumW += w; sumX += w * node.x; sumY += w * node.y
+        }
+        return if (sumW > 0) (sumX / sumW) to (sumY / sumW) else (null to null)
+    }
+
+    private companion object {
+        const val MAX_DISTANCE_M = 15.0
+    }
 }
