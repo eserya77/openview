@@ -98,13 +98,18 @@ object TestSetupRepository {
     private var initialized = false
     private lateinit var appContext: Context
 
-    data class State(val setups: List<TestSetup>, val selectedId: String, val laps: Map<String, Int>)
+    /** [assignment]: última asignación de balizas usada por escenario (setupId -> baliza en cada posición). */
+    data class State(val setups: List<TestSetup>, val selectedId: String, val laps: Map<String, Int>, val assignment: Map<String, List<String>> = emptyMap())
 
     private val _state = MutableStateFlow(State(seed(), SALA_ID, emptyMap()))
     val state: StateFlow<State> = _state.asStateFlow()
 
     const val SALA_ID = "sala_trapecio"
     const val CUARTO_ID = "cuarto_cuadrado"
+    const val RECTA_ID = "sala_recta"
+
+    /** Balizas por defecto de cada escenario de fábrica (posición i -> baliza). */
+    val DEFAULT_BEACONS: Map<String, List<String>> = mapOf(RECTA_ID to listOf("NAV_BLE_01", "NAV_BLE_02", "NAV_BLE_03"))
 
     fun initialize(context: Context) {
         if (initialized) return
@@ -127,6 +132,11 @@ object TestSetupRepository {
     /** Número de vuelta siguiente para (escenario, rotación): 1, 2, 3… */
     fun nextLap(setupId: String, rotationId: String): Int = (_state.value.laps["$setupId|$rotationId"] ?: 0) + 1
 
+    /** Recuerda qué baliza hay en cada posición (lo usa la guía de usuario para no volver a preguntarlo). */
+    fun rememberAssignment(setupId: String, beaconAt: List<String>) = update { it.copy(assignment = it.assignment + (setupId to beaconAt)) }
+
+    fun assignmentFor(setupId: String): List<String>? = _state.value.assignment[setupId] ?: DEFAULT_BEACONS[setupId]
+
     fun lapDone(setupId: String, rotationId: String) = update { st ->
         val k = "$setupId|$rotationId"
         st.copy(laps = st.laps + (k to (st.laps[k] ?: 0) + 1))
@@ -147,6 +157,16 @@ object TestSetupRepository {
                 TestSpot("P4", "Posición 4", 0.0, 1.9)
             )
         ),
+        // Prueba del 24-sep-2026: sala en línea recta, 01 · 2,10 m · 02 · 2,60 m · 03 (firmware v3). Inicio 1 m antes de la 01.
+        TestSetup(
+            RECTA_ID, "Sala recta (01 · 2,10 m · 02 · 2,60 m · 03)",
+            listOf(
+                TestSpot("P1", "Baliza 1", 0.0, 0.0),
+                TestSpot("P2", "Baliza 2", 2.10, 0.0),
+                TestSpot("P3", "Baliza 3", 4.70, 0.0)
+            ),
+            startX = -1.0, startY = 0.0
+        ),
         TestSetup(
             CUARTO_ID, "Cuarto pequeño (cuadrado)",
             listOf(
@@ -161,6 +181,7 @@ object TestSetupRepository {
     private fun save(st: State) {
         val root = JSONObject().put("selected", st.selectedId)
         root.put("laps", JSONObject().also { o -> st.laps.forEach { (k, v) -> o.put(k, v) } })
+        root.put("assignment", JSONObject().also { o -> st.assignment.forEach { (k, v) -> o.put(k, JSONArray(v)) } })
         root.put("setups", JSONArray().also { arr ->
             st.setups.forEach { s ->
                 arr.put(JSONObject().apply {
@@ -193,8 +214,11 @@ object TestSetupRepository {
             }
         }
         val laps = root.optJSONObject("laps")?.let { l -> l.keys().asSequence().associateWith { k -> l.getInt(k) } } ?: emptyMap()
+        val assignment = root.optJSONObject("assignment")?.let { a ->
+            a.keys().asSequence().associateWith { k -> a.getJSONArray(k).let { arr -> (0 until arr.length()).map { arr.getString(it) } } }
+        } ?: emptyMap()
         // Los escenarios de fábrica que falten (versiones nuevas) se agregan al final.
         val merged = setups + seed().filter { s -> setups.none { it.id == s.id } }
-        if (merged.isEmpty()) null else State(merged, root.optString("selected", merged.first().id), laps)
+        if (merged.isEmpty()) null else State(merged, root.optString("selected", merged.first().id), laps, assignment)
     }.getOrNull()
 }

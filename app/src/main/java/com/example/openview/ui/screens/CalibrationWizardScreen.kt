@@ -212,7 +212,8 @@ fun CalibrationWizardScreen(scanner: BleScanner, statusBar: @Composable () -> Un
 
     fun finishBeacon() {
         val name = queue[bi]
-        current = ProfileFitter.build(name, "${Build.MANUFACTURER} ${Build.MODEL}", System.currentTimeMillis(), results.toList())
+        val tx = scanner.state.value.targets.firstOrNull { it.name == name }?.txLevel
+        current = ProfileFitter.build(name, "${Build.MANUFACTURER} ${Build.MODEL}", System.currentTimeMillis(), results.toList(), tx)
         phase = WizardPhase.BEACON_DONE
     }
 
@@ -278,7 +279,7 @@ fun CalibrationWizardScreen(scanner: BleScanner, statusBar: @Composable () -> Un
                         val visible = b.name in visibleNames
                         BeaconChoiceRow(
                             name = b.name, rssi = if (visible) dev?.rssi else null, visible = visible,
-                            quality = b.profile?.quality, checked = b.name in chosen,
+                            quality = b.profile?.quality, stale = b.profile?.isStaleFor(dev?.txLevel) == true, checked = b.name in chosen,
                             onToggle = { on -> if (on) { if (b.name !in chosen) chosen.add(b.name) } else chosen.remove(b.name) }
                         )
                     }
@@ -487,7 +488,7 @@ fun CalibrationWizardScreen(scanner: BleScanner, statusBar: @Composable () -> Un
 // ───────────────────────── piezas del asistente ─────────────────────────
 
 @Composable
-private fun BeaconChoiceRow(name: String, rssi: Int?, visible: Boolean, quality: Quality?, checked: Boolean, onToggle: (Boolean) -> Unit) {
+private fun BeaconChoiceRow(name: String, rssi: Int?, visible: Boolean, quality: Quality?, stale: Boolean, checked: Boolean, onToggle: (Boolean) -> Unit) {
     val color = if (visible) AdminColors.good else MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -507,7 +508,11 @@ private fun BeaconChoiceRow(name: String, rssi: Int?, visible: Boolean, quality:
                 style = MaterialTheme.typography.bodySmall, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
-        if (quality != null) StatusPill("Perfil ${quality.name}", qualityColor(quality)) else StatusPill("Sin perfil", MaterialTheme.colorScheme.onSurfaceVariant)
+        when {
+            stale -> StatusPill("Recalibrar", AdminColors.bad, icon = Icons.Filled.Warning)
+            quality != null -> StatusPill("Perfil ${quality.name}", qualityColor(quality))
+            else -> StatusPill("Sin perfil", MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Checkbox(checked = checked, onCheckedChange = onToggle, enabled = visible)
     }
 }

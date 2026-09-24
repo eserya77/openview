@@ -89,7 +89,30 @@ private enum class GuidedPhase { SETUP, WALK, DWELL, DONE }
 private enum class StayType(val id: String, val label: String, val instruction: String) {
     CONTACT("contacto", "Contacto (móvil apoyado)", "Apoya el móvil en la baliza, en el extremo de la antena, siempre el mismo lado."),
     CM30("30cm", "A 30 cm", "Ponte a 30 cm de la baliza (mídelo con la cinta), con el móvil en la mano como siempre."),
-    M1("1m", "A 1 m", "Ponte a 1 m de la baliza (mídelo con la cinta), con el móvil en la mano como siempre.")
+    M1("1m", "A 1 m", "Ponte a 1 m de la baliza (mídelo con la cinta), con el móvil en la mano como siempre."),
+    PASS("pasar", "Pasando sin parar (marca al pasar)", "Camina a paso normal junto a la línea de balizas y pulsa PASO (o Vol+) justo cuando la baliza quede a tu lado. No te detengas.")
+}
+
+/** Sentido del recorrido. Sirve para probar lo mismo en las dos direcciones y la vuelta atrás. */
+private enum class Direction(val id: String, val label: String) {
+    IDA("ida", "Ida (P1 → último)"),
+    VUELTA("vuelta", "Vuelta (último → P1)"),
+    IDA_VUELTA("idavuelta", "Ida y vuelta")
+}
+
+/** Orden de los puntos según el sentido (ids de nodo; en ida y vuelta el último no se repite). */
+private fun orderFor(ids: List<String>, d: Direction): List<String> = when (d) {
+    Direction.IDA -> ids
+    Direction.VUELTA -> ids.reversed()
+    Direction.IDA_VUELTA -> ids + ids.reversed().drop(1)
+}
+
+/** Punto de inicio: el del escenario; en la vuelta, su simétrico respecto al centro del recorrido (p. ej. 1 m después de la última). */
+private fun startFor(setup: TestSetup, d: Direction): Pair<Double, Double> {
+    val (cx, cy) = setup.center
+    if (d != Direction.VUELTA || setup.startX == null) return cx to cy
+    val xs = setup.spots.map { it.x }; val ys = setup.spots.map { it.y }
+    return (xs.min() + xs.max() - cx) to (ys.min() + ys.max() - cy)
 }
 
 private data class Step(val node: NavNode, val isCenter: Boolean)
@@ -130,11 +153,14 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
     var startAtCenter by remember { mutableStateOf(true) }
     var editingSetup by remember { mutableStateOf(false) }
     var trainChoice by remember { mutableStateOf<Boolean?>(null) }   // null = automático (entrenar si aún no hay huellas)
+    var direction by remember { mutableStateOf(Direction.IDA) }
 
     val allBeacons = catalog.beacons.map { it.name }.sorted()
     // Al abrir: por defecto las balizas detectadas (o las primeras) hasta completar las posiciones.
     LaunchedEffect(scan.targets.size, allBeacons.size, spotCount) {
         if (picked.isEmpty()) {
+            val preferred = TestSetupRepository.assignmentFor(setup.id)?.takeIf { it.size == spotCount }
+            if (preferred != null) { preferred.forEach { picked.add(it) }; return@LaunchedEffect }
             val seen = scan.targets.mapNotNull { it.name }.distinct().sorted()
             (seen + allBeacons.filter { it !in seen }).take(spotCount).forEach { picked.add(it) }
         }
@@ -151,11 +177,12 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
     val layoutKey = effectiveRotation?.let { TestLayout.key(setup, it, stay.id) }
     val storedLaps by FingerprintRepository.laps.collectAsState()
     val lapsForKey = layoutKey?.let { storedLaps[it]?.values?.maxOfOrNull { l -> l.size } } ?: 0
-    val trainMode = trainChoice ?: (lapsForKey == 0)
+    val trainMode = stay != StayType.PASS && (trainChoice ?: (lapsForKey == 0))
+    val walkOrder = graph?.let { g -> orderFor(g.nodes.map { it.id }, direction) }
 
     // El grafo temporal (con el orden de los puntos) y las huellas de esta disposición hacen que el posicionador
     // use exactamente estas posiciones/balizas mientras la pantalla está abierta.
-    LaunchedEffect(graph, layoutKey) { ActiveGraph.useTemporary(graph); ActiveFingerprints.key = layoutKey }
+    LaunchedEffect(graph, layoutKey, walkOrder) { ActiveGraph.useTemporary(graph, walkOrder); ActiveFingerprints.key = layoutKey }
     DisposableEffect(Unit) { onDispose { ActiveGraph.useTemporary(null); ActiveFingerprints.key = null } }
 
     // --- Ejecución ---
@@ -172,12 +199,16 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
     var runKey by remember { mutableStateOf<String?>(null) }
     var runTrain by remember { mutableStateOf(false) }
     var trainedNow by remember { mutableStateOf(false) }
+    var runStay by remember { mutableStateOf(StayType.CONTACT) }
+    var passSummary by remember { mutableStateOf<com.example.openview.logging.PassSummary?>(null) }
 
     fun finishTest() {
         BleSessionLogger.stop()
         val rot = runRotation; val st = runSetup
         val beaconOfNode = if (rot != null && st != null) st.spots.mapIndexed { i, s -> s.id to rot.beaconAt[i] }.toMap() else emptyMap()
-        summary = SessionAnalyzer.analyze(BleSessionLogger.currentRows(), beaconOfNode)
+        val rows = BleSessionLogger.currentRows()
+        if (runStay == StayType.PASS) { passSummary = com.example.openview.logging.PassAnalyzer.analyze(rows, beaconOfNode); summary = null }
+        else { summary = SessionAnalyzer.analyze(rows, beaconOfNode); passSummary = null }
         if (rot != null && st != null) TestSetupRepository.lapDone(st.id, rot.id)
         phase = GuidedPhase.DONE
     }
@@ -192,6 +223,12 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
         val step = runSteps[index]
         BleSessionLogger.markNode(MarkEvent.ARRIVE, step.node, lagS.toDouble())
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        // Pasando sin parar: la marca es el instante de pasar; se cierra al momento y se sigue caminando.
+        if (runStay == StayType.PASS && !step.isCenter) {
+            BleSessionLogger.markNode(MarkEvent.DEPART, step.node, lagS.toDouble())
+            if (index >= runSteps.lastIndex) finishTest() else index += 1
+            return
+        }
         val remaining = (dwellSeconds - lagS).coerceAtLeast(3)
         dwellEndMs = SystemClock.elapsedRealtime() + remaining * 1000L
         phase = GuidedPhase.DWELL
@@ -200,21 +237,23 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
     fun startRun(rot: Rotation, g: com.example.openview.data.NavGraph) {
         val lap = TestSetupRepository.nextLap(setup.id, rot.id)
         val name = sessionName.ifBlank { "${setup.id}_${rot.id}_v$lap" }
+        val byId = g.nodes.associateBy { it.id }
         val steps = buildList {
             if (startAtCenter) {
-                val (cx, cy) = setup.center
-                add(Step(NavNode(CENTER_NODE_ID, "Centro (inicio)", cx, cy, null), true))
+                val (cx, cy) = startFor(setup, direction)
+                add(Step(NavNode(CENTER_NODE_ID, "Inicio", cx, cy, null), true))
             }
-            g.nodes.forEach { add(Step(it, false)) }
+            orderFor(g.nodes.map { it.id }, direction).forEach { add(Step(byId.getValue(it), false)) }
         }
-        runSteps = steps; runRotation = rot; runSetup = setup
+        runSteps = steps; runRotation = rot; runSetup = setup; runStay = stay
         runKey = layoutKey; runTrain = trainMode; trainedNow = false
-        index = 0; summary = null
+        index = 0; summary = null; passSummary = null
+        TestSetupRepository.rememberAssignment(setup.id, rot.beaconAt)
         ActiveGraph.resetToken += 1        // el posicionador empieza la vuelta sin el progreso de la anterior
         BleSessionLogger.start(name, "Prueba guiada v3, ${g.nodes.size} posiciones, estancia $dwellSeconds s, ${stay.id}")
         val power = setup.spots.joinToString("|") { "${it.id}:${setup.power[it.id] ?: "?"}" }
         BleSessionLogger.addLayout(
-            "setup=${setup.id};rot=${rot.id};${TestLayout.describe(setup, rot)};stay=${stay.id};dwell=$dwellSeconds;lap=$lap;power=$power;center=${startAtCenter};mode=${if (trainMode) "entrenar" else "validar"};fp_laps=$lapsForKey"
+            "setup=${setup.id};rot=${rot.id};${TestLayout.describe(setup, rot)};stay=${stay.id};dir=${direction.id};dwell=$dwellSeconds;lap=$lap;power=$power;center=${startAtCenter};mode=${if (stay == StayType.PASS) "pasar" else if (trainMode) "entrenar" else "validar"};fp_laps=$lapsForKey"
         )
         phase = GuidedPhase.WALK
     }
@@ -336,7 +375,8 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
 
                 // ---- Modo ----
                 SectionHeader("Modo", 4, "Entrenar guarda huellas; validar mide el resultado real.")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                if (stay == StayType.PASS) SlotText("En «pasando sin parar» no se entrenan huellas: se mide si la app detecta cada baliza al pasar y cuánto tarda.", minLines = 2, color = MaterialTheme.colorScheme.onSurface)
+                else Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     if (trainMode) Button(onClick = {}, modifier = Modifier.weight(1f)) { Text("Entrenar") } else OutlinedButton(onClick = { trainChoice = true }, modifier = Modifier.weight(1f)) { Text("Entrenar") }
                     if (!trainMode) Button(onClick = {}, modifier = Modifier.weight(1f)) { Text("Validar") } else OutlinedButton(onClick = { trainChoice = false }, modifier = Modifier.weight(1f)) { Text("Validar") }
                 }
@@ -349,12 +389,20 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
                 if (!trainMode && lapsForKey == 0) Text("No hay huellas para validar: entrena primero.", color = FailureRed, style = MaterialTheme.typography.bodyMedium)
 
                 // ---- Opciones ----
-                SectionHeader("Cómo haces cada parada", 5)
+                SectionHeader("Sentido del recorrido", 5, "Prueba lo mismo de ida, de vuelta, o ida y vuelta seguidas.")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Direction.entries.forEach { d ->
+                        if (d == direction) Button(onClick = {}, modifier = Modifier.weight(1f).height(52.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)) { Text(d.label, style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.Center, maxLines = 2) }
+                        else OutlinedButton(onClick = { direction = d }, modifier = Modifier.weight(1f).height(52.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)) { Text(d.label, style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.Center, maxLines = 2) }
+                    }
+                }
+                walkOrder?.let { o -> Text("Orden: " + o.joinToString(" → "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth()) }
+                SectionHeader("Cómo haces cada parada", 6)
                 StayType.entries.forEach { t ->
                     if (t == stay) Button(onClick = {}, modifier = Modifier.fillMaxWidth()) { Text(t.label) }
                     else OutlinedButton(onClick = { stay = t }, modifier = Modifier.fillMaxWidth()) { Text(t.label) }
                 }
-                Text("Tiempo quieto en cada punto", style = MaterialTheme.typography.titleSmall, modifier = Modifier.fillMaxWidth())
+                Text(if (stay == StayType.PASS) "Tiempo quieto en el inicio" else "Tiempo quieto en cada punto", style = MaterialTheme.typography.titleSmall, modifier = Modifier.fillMaxWidth())
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     DWELL_OPTIONS.forEach { s ->
                         if (s == dwellSeconds) Button(onClick = {}, modifier = Modifier.weight(1f)) { Text("$s s") }
@@ -369,8 +417,12 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
 
                 val uncal = picked.count { !RouteRepository.isCalibrated(it) }
                 if (uncal > 0) Text("$uncal baliza(s) sin calibrar: úsalas igual para medir; para mejorar el resultado usa «Calibrar balizas».", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                val fw = picked.mapNotNull { byName[it]?.fwVersion }.toSet(); val tx = picked.mapNotNull { byName[it]?.txLevel }.toSet()
-                if (fw.size > 1 || tx.size > 1) Text("Aviso: firmware o potencia TX distintos entre las balizas elegidas.", color = FailureRed, style = MaterialTheme.typography.bodyMedium)
+                // Firmware v3 recorta la potencia de 01 y 03 A PROPÓSITO: una potencia distinta ya no es un error,
+                // pero sí lo es un firmware mezclado o un perfil calibrado con otra potencia.
+                val fw = picked.mapNotNull { byName[it]?.fwVersion }.toSet()
+                if (fw.size > 1) Text("Aviso: las balizas elegidas tienen firmware distinto (${fw.sorted().joinToString { "v$it" }}). Sube la misma versión a todas.", color = FailureRed, style = MaterialTheme.typography.bodyMedium)
+                val stale = picked.filter { n -> catalog.beacons.firstOrNull { it.name == n }?.profile?.isStaleFor(byName[n]?.txLevel) == true }
+                if (stale.isNotEmpty()) Text("Recalibra ${stale.joinToString { it.takeLast(2) }}: su potencia cambió desde la calibración (y borra sus huellas).", color = FailureRed, style = MaterialTheme.typography.bodyMedium)
 
                 PrimaryActionButton("Empezar prueba", icon = Icons.Filled.FiberManualRecord, onClick = {
                     if (effectiveRotation != null && graph != null) startRun(effectiveRotation, graph)
@@ -397,15 +449,16 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
                 if (phase == GuidedPhase.WALK) {
                     SlotText(
                         if (step.isCenter) "Ponte en el centro del área, sin acercarte a ninguna baliza. Toca «ESTOY EN EL CENTRO» (o Vol+) al detenerte."
-                        else "Ve a la posición (${"%.1f".format(node.x)} , ${"%.1f".format(node.y)}) m. ${stay.instruction} Toca LLEGUÉ (o Vol+) apenas te detengas.",
+                        else if (runStay == StayType.PASS) "Camina hacia ${node.label} (${"%.1f".format(node.x)} , ${"%.1f".format(node.y)}) m. ${runStay.instruction}"
+                        else "Ve a la posición (${"%.1f".format(node.x)} , ${"%.1f".format(node.y)}) m. ${runStay.instruction} Toca LLEGUÉ (o Vol+) apenas te detengas.",
                         minLines = 5, maxLines = 6, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
                     )
                     Button(onClick = { arrive(0) }, modifier = Modifier.fillMaxWidth().heightIn(min = 110.dp)) {
-                        Text(if (step.isCenter) "ESTOY EN EL CENTRO" else "LLEGUÉ", fontSize = if (step.isCenter) 26.sp else 34.sp, fontWeight = FontWeight.Bold)
+                        Text(if (step.isCenter) "ESTOY EN EL INICIO" else if (runStay == StayType.PASS) "PASO JUNTO A ELLA" else "LLEGUÉ", fontSize = if (step.isCenter || runStay == StayType.PASS) 26.sp else 34.sp, fontWeight = FontWeight.Bold)
                     }
-                    Text("¿Tocaste tarde? Llegué hace…", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (runStay == StayType.PASS) "¿Tocaste tarde? La pasé hace…" else "¿Tocaste tarde? Llegué hace…", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        LAG_OPTIONS.forEach { lag ->
+                        (if (runStay == StayType.PASS) listOf(1, 2, 3) else LAG_OPTIONS).forEach { lag ->
                             OutlinedButton(onClick = { arrive(lag) }, modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("$lag s") }
                         }
                     }
@@ -433,7 +486,13 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
                 SecondaryActionButton("Terminar ahora", icon = Icons.Filled.Stop, onClick = { finishTest() })
             }
 
-            GuidedPhase.DONE -> DonePhase(
+            GuidedPhase.DONE -> if (runStay == StayType.PASS) PassDone(
+                summary = passSummary,
+                nodeLabels = runSteps.associate { it.node.id to it.node.label },
+                onExport = { BleSessionLogger.exportAndShare(context) },
+                onAgain = { phase = GuidedPhase.SETUP; passSummary = null },
+                onBack = onBack
+            ) else DonePhase(
                 summary = summary,
                 nodeLabels = (runSteps.associate { it.node.id to it.node.label }),
                 assignment = runSetup?.let { st -> runRotation?.let { r -> TestLayout.describe(st, r) } } ?: "",
@@ -569,6 +628,33 @@ private fun RunMap(nodes: List<NavNode>, index: Int, dwelling: Boolean) {
             )
         }
     }
+}
+
+/** Resultado del modo «pasando sin parar». */
+@Composable
+private fun PassDone(summary: com.example.openview.logging.PassSummary?, nodeLabels: Map<String, String>, onExport: () -> Unit, onAgain: () -> Unit, onBack: () -> Unit) {
+    if (summary == null || summary.points.isEmpty()) {
+        Text("No marcaste ningún paso: no hay nada que evaluar.", style = MaterialTheme.typography.bodyLarge)
+    } else {
+        val good = summary.detected == summary.points.size && summary.orderOk
+        AdminCard(container = (if (good) AdminColors.goodFill else AdminColors.bad).copy(alpha = .12f), border = null) {
+            Text("Detectó ${summary.detected} de ${summary.points.size} al pasar", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(if (summary.orderOk) "✓ En el mismo orden en que las pasaste." else "✗ Orden de la app: " + summary.appSequence.joinToString(" → ") { nodeLabels[it] ?: it }, style = MaterialTheme.typography.bodyLarge)
+            summary.meanAbsPeakOffsetS?.let { Text("El pico de señal quedó a %.1f s de tu marca (media).".format(it), style = MaterialTheme.typography.bodyMedium) }
+        }
+        summary.points.forEach { p ->
+            AdminCard {
+                Text("${nodeLabels[p.nodeId] ?: p.nodeId} · ${p.beaconName ?: "?"}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+                    color = if (p.detectLatencyS != null) AdminColors.good else AdminColors.bad)
+                StatRow("La app lo nombró", p.detectLatencyS?.let { "%+.1f s".format(it) } ?: "no")
+                StatRow("Pico de señal", p.peakRssi?.let { "$it dBm  (%+.1f s)".format(p.peakOffsetS ?: 0.0) } ?: "no se oyó")
+            }
+        }
+        Text("Negativo = antes de tu marca. Una app útil al caminar nombra cada baliza entre −1 y +2 s de pasarla.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    SecondaryActionButton("Exportar CSV", icon = Icons.Filled.Share, onClick = onExport)
+    SecondaryActionButton("Nueva prueba", onClick = onAgain)
+    SecondaryActionButton("Volver", icon = Icons.AutoMirrored.Filled.ArrowBack, onClick = onBack)
 }
 
 @Composable

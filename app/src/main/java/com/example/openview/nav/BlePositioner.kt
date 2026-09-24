@@ -39,7 +39,7 @@ class BlePositioner(
     private val fingerprintProvider: () -> FingerprintSet? = { ActiveFingerprints.current() },
     private val profileProvider: (String) -> BeaconProfile? = { RouteRepository.profileFor(it) },
     /** El perfil de calibración da el nivel de CONTACTO: solo sirve si la parada es de contacto (o se desconoce). */
-    private val contactModeProvider: () -> Boolean = { ActiveFingerprints.key?.endsWith("|contacto") != false },
+    private val contactModeProvider: () -> Boolean = { ActiveFingerprints.key?.let { it.endsWith("|contacto") || it.endsWith("|pasar") } != false },
     private val resetTokenProvider: () -> Int = { ActiveGraph.resetToken }
 ) {
 

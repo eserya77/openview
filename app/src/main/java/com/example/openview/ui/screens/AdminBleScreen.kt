@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
@@ -112,7 +113,7 @@ import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 private const val PRESENT_WINDOW_MS = 5_000L
-private enum class AdminPage { HOME, ROUTES, BEACONS, EDITOR, REPLAY, GUIDED, CALIBRATE }
+private enum class AdminPage { HOME, ROUTES, BEACONS, EDITOR, REPLAY, GUIDED, CALIBRATE, USER_GUIDE }
 
 /** Centro de control local de las rutas y balizas del edificio. */
 @Composable
@@ -154,12 +155,13 @@ fun AdminBleScreen(scanner: BleScanner, onBack: () -> Unit) {
     }
 
     when (page) {
-        AdminPage.HOME -> AdminHome(catalog.routes.firstOrNull { it.id == catalog.activeRouteId }, catalog.beacons.count { it.enabled }, catalog.beacons.size, catalog.beacons.count { it.profile != null }, statusBar, { page = AdminPage.ROUTES }, { page = AdminPage.BEACONS }, { page = AdminPage.REPLAY }, { page = AdminPage.GUIDED }, { page = AdminPage.CALIBRATE }, onBack)
+        AdminPage.HOME -> AdminHome(catalog.routes.firstOrNull { it.id == catalog.activeRouteId }, catalog.beacons.count { it.enabled }, catalog.beacons.size, catalog.beacons.count { it.profile != null }, statusBar, { page = AdminPage.ROUTES }, { page = AdminPage.BEACONS }, { page = AdminPage.REPLAY }, { page = AdminPage.GUIDED }, { page = AdminPage.CALIBRATE }, { page = AdminPage.USER_GUIDE }, onBack)
         AdminPage.ROUTES -> RouteList(catalog.routes, catalog.activeRouteId, { page = AdminPage.HOME }, { id -> editingRouteId = id; page = AdminPage.EDITOR }, { id -> editingRouteId = id; page = AdminPage.EDITOR }, RouteRepository::activate)
         AdminPage.BEACONS -> BeaconInventory(catalog.beacons, scan.targets, now, scanner, statusBar, { page = AdminPage.HOME }, RouteRepository::setBeaconEnabled)
         AdminPage.REPLAY -> ReplayScreen(onBack = { page = AdminPage.HOME })
         AdminPage.GUIDED -> GuidedTestScreen(scanner, statusBar, onBack = { page = AdminPage.HOME })
         AdminPage.CALIBRATE -> CalibrationWizardScreen(scanner, statusBar, onBack = { page = AdminPage.HOME })
+        AdminPage.USER_GUIDE -> UserGuideScreen(scanner, statusBar, onBack = { page = AdminPage.HOME })
         AdminPage.EDITOR -> {
             val route = catalog.routes.firstOrNull { it.id == editingRouteId }
             if (route == null) page = AdminPage.ROUTES else RouteEditor(route, catalog.beacons, catalog.activeRouteId, { page = AdminPage.ROUTES }, RouteRepository::activate, RouteRepository::renameRoute, { RouteRepository.deleteRoute(it); page = AdminPage.ROUTES }, RouteRepository::addNode, RouteRepository::updateNode, RouteRepository::removeNode, RouteRepository::connect, RouteRepository::disconnect, RouteRepository.validate(route.id))
@@ -189,7 +191,7 @@ private fun AdminEntry(step: Int?, title: String, subtitle: String, icon: androi
 }
 
 @Composable
-private fun AdminHome(active: SavedRoute?, usable: Int, total: Int, profiled: Int, statusBar: @Composable () -> Unit, onRoutes: () -> Unit, onBeacons: () -> Unit, onReplay: () -> Unit, onGuided: () -> Unit, onCalibrate: () -> Unit, onBack: () -> Unit) {
+private fun AdminHome(active: SavedRoute?, usable: Int, total: Int, profiled: Int, statusBar: @Composable () -> Unit, onRoutes: () -> Unit, onBeacons: () -> Unit, onReplay: () -> Unit, onGuided: () -> Unit, onCalibrate: () -> Unit, onUserGuide: () -> Unit, onBack: () -> Unit) {
     ScreenScaffold(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         ScreenTitle("Administración")
         statusBar()
@@ -201,7 +203,8 @@ private fun AdminHome(active: SavedRoute?, usable: Int, total: Int, profiled: In
         Text("Orden recomendado", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth())
         AdminEntry(1, "Calibrar balizas", "Un asistente con mapa te guía por distancias y ángulos.", Icons.Filled.Tune, MaterialTheme.colorScheme.primary, onCalibrate)
         AdminEntry(2, "Prueba guiada", "Recorre las posiciones, rota las placas y mide el acierto.", Icons.Filled.FiberManualRecord, AdminColors.bad, onGuided)
-        AdminEntry(3, "Rutas", "Crea el plano de puntos y activa la ruta cuando esté lista.", Icons.Filled.Route, AdminColors.good, onRoutes)
+        AdminEntry(3, "Guía de usuario (modo prueba)", "Lo que oirá la persona ciega, con registros detallados.", Icons.Filled.RecordVoiceOver, MaterialTheme.colorScheme.tertiary, onUserGuide)
+        AdminEntry(4, "Rutas", "Crea el plano de puntos y activa la ruta cuando esté lista.", Icons.Filled.Route, AdminColors.good, onRoutes)
         Text("Herramientas", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth())
         AdminEntry(null, "Balizas y registro", "Señal de cada baliza en vivo, activarlas y grabar CSV.", Icons.Filled.Radar, AdminColors.beacon, onBeacons)
         AdminEntry(null, "Replay", "Repite una prueba grabada con otro algoritmo o ajuste.", Icons.Filled.History, MaterialTheme.colorScheme.secondary, onReplay)
@@ -576,12 +579,14 @@ private fun BeaconCard(beacon: ManagedBeacon, device: BleDeviceInfo?, present: B
             RssiReadout(if (present && beacon.enabled) device?.rssi else null, big = false, color = color)
             Switch(checked = beacon.enabled, onCheckedChange = { onSetEnabled(beacon.name, it) })
         }
+        val stale = beacon.profile?.isStaleFor(device?.txLevel) == true
         SlotText(
+            (if (stale) "⚠ Su potencia cambió desde la calibración: vuelve a calibrarla. " else "") +
             (beacon.measuredPowerAt1m?.let { "Calibrada: $it dBm a 1 m" } ?: "Sin calibrar (usa la referencia global)") +
                 (beacon.profile?.let { " · perfil ${it.quality.label}" } ?: "") +
                 (device?.fwVersion?.let { " · firmware v$it" } ?: "") +
                 (device?.txLevel?.let { " · TX ${-12 + 3 * it} dBm" } ?: ""),
-            minLines = 2, style = MaterialTheme.typography.bodySmall
+            minLines = 2, style = MaterialTheme.typography.bodySmall, color = if (stale) AdminColors.bad else MaterialTheme.colorScheme.onSurfaceVariant
         )
         OutlinedButton(onClick = { onCalibrate(beacon.name) }, enabled = present, modifier = Modifier.fillMaxWidth().height(48.dp)) {
             Icon(Icons.Filled.Tune, null); Spacer(Modifier.width(8.dp))

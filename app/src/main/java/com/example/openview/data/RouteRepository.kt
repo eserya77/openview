@@ -34,7 +34,9 @@ data class ManagedBeacon(
     val enabled: Boolean = true,
     val measuredPowerAt1m: Int? = null,
     /** Perfil completo del asistente de calibración (contacto, curva, asimetría, calidad). Null si no se ha calibrado con él. */
-    val profile: BeaconProfile? = null
+    val profile: BeaconProfile? = null,
+    /** Nivel de potencia con que se midió [measuredPowerAt1m]. Null = calibración antigua (firmware v2, +9 dBm = nivel 7). */
+    val calibratedTx: Int? = null
 )
 
 data class RouteCatalog(
@@ -141,20 +143,32 @@ object RouteRepository {
      * y el registro de calibración, para no divergir sobre qué número usar.
      */
     fun calibrationFor(beaconName: String): Int =
-        _catalog.value.beacons.firstOrNull { it.name == beaconName.uppercase() }?.measuredPowerAt1m
+        _catalog.value.beacons.firstOrNull { it.name == beaconName.uppercase() }?.takeUnless { isStale(it) }?.measuredPowerAt1m
             ?: RSSI_AT_ONE_METER
+
+    /**
+     * true si la baliza tiene calibración pero hoy anuncia otra potencia (p. ej. 01 y 03 tras el firmware v3): esa
+     * calibración ya no vale y se ignora hasta recalibrar.
+     */
+    fun isStale(beaconName: String): Boolean = _catalog.value.beacons.firstOrNull { it.name == beaconName.uppercase() }?.let(::isStale) == true
+
+    private fun isStale(b: ManagedBeacon): Boolean {
+        if (b.measuredPowerAt1m == null) return false
+        val live = com.example.openview.ble.BeaconTxRegistry.get(b.name) ?: return false
+        return (b.calibratedTx ?: com.example.openview.calibration.BeaconProfile.LEGACY_TX_LEVEL) != live
+    }
 
     /** true si esta baliza ya tiene su propia referencia a 1 m (si no, se usa la global y su RSSI no es comparable con el de otras). */
     fun isCalibrated(beaconName: String): Boolean =
-        _catalog.value.beacons.firstOrNull { it.name == beaconName.uppercase() }?.measuredPowerAt1m != null
+        _catalog.value.beacons.firstOrNull { it.name == beaconName.uppercase() }?.let { it.measuredPowerAt1m != null && !isStale(it) } == true
 
     /** Guarda la referencia a 1 m calibrada a mano para una baliza. `null` vuelve a usar la global. */
     fun setBeaconCalibration(name: String, measuredPowerAt1m: Int?) = updateCatalog { catalog ->
         val normalized = name.uppercase()
         val current = catalog.beacons
         val updated = if (current.any { it.name == normalized }) {
-            current.map { if (it.name == normalized) it.copy(measuredPowerAt1m = measuredPowerAt1m) else it }
-        } else current + ManagedBeacon(normalized, measuredPowerAt1m = measuredPowerAt1m)
+            current.map { if (it.name == normalized) it.copy(measuredPowerAt1m = measuredPowerAt1m, calibratedTx = com.example.openview.ble.BeaconTxRegistry.get(normalized)) else it }
+        } else current + ManagedBeacon(normalized, measuredPowerAt1m = measuredPowerAt1m, calibratedTx = com.example.openview.ble.BeaconTxRegistry.get(normalized))
         catalog.copy(beacons = updated.sortedBy { it.name })
     }
 
@@ -167,8 +181,9 @@ object RouteRepository {
         val a1 = profile.a1m?.let { Math.round(it).toInt() }
         val current = catalog.beacons
         val updated = if (current.any { it.name == normalized }) {
-            current.map { if (it.name == normalized) it.copy(profile = profile, measuredPowerAt1m = a1 ?: it.measuredPowerAt1m) else it }
-        } else current + ManagedBeacon(normalized, measuredPowerAt1m = a1, profile = profile)
+            val tx = profile.txLevel ?: com.example.openview.ble.BeaconTxRegistry.get(normalized)
+            current.map { if (it.name == normalized) it.copy(profile = profile, measuredPowerAt1m = a1 ?: it.measuredPowerAt1m, calibratedTx = tx) else it }
+        } else current + ManagedBeacon(normalized, measuredPowerAt1m = a1, profile = profile, calibratedTx = profile.txLevel ?: com.example.openview.ble.BeaconTxRegistry.get(normalized))
         catalog.copy(beacons = updated.sortedBy { it.name })
     }
 
@@ -229,7 +244,8 @@ object RouteRepository {
         root.put("beacons", JSONArray().apply {
             catalog.beacons.forEach {
                 put(JSONObject().put("name", it.name).put("enabled", it.enabled).put("calibration", it.measuredPowerAt1m ?: JSONObject.NULL)
-                    .put("profile", it.profile?.let { p -> ProfileJson.toJson(p) } ?: JSONObject.NULL))
+                    .put("profile", it.profile?.let { p -> ProfileJson.toJson(p) } ?: JSONObject.NULL)
+                    .put("calTx", it.calibratedTx ?: JSONObject.NULL))
             }
         })
         root.put("routes", JSONArray().apply {
@@ -253,7 +269,8 @@ object RouteRepository {
                 it.getString("name"),
                 it.optBoolean("enabled", true),
                 if (it.has("calibration") && !it.isNull("calibration")) it.getInt("calibration") else null,
-                if (it.has("profile") && !it.isNull("profile")) runCatching { ProfileJson.fromJson(it.getJSONObject("profile")) }.getOrNull() else null
+                if (it.has("profile") && !it.isNull("profile")) runCatching { ProfileJson.fromJson(it.getJSONObject("profile")) }.getOrNull() else null,
+                if (it.has("calTx") && !it.isNull("calTx")) it.getInt("calTx") else null
             )
         }
         val routes = root.getJSONArray("routes").mapObjects { obj ->

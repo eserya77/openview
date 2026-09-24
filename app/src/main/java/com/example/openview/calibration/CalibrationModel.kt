@@ -95,8 +95,21 @@ data class BeaconProfile(
     val asymmetryDb: Double?,
     val meanRatePerS: Double,
     val quality: Quality,
-    val reasons: List<String>
-)
+    val reasons: List<String>,
+    /** Nivel de potencia TX que anunciaba la baliza al calibrarla (0..7; firmware v2+). Si cambia, el perfil ya no vale. */
+    val txLevel: Int? = null
+) {
+    /**
+     * true si la baliza anuncia ahora OTRA potencia que la de la calibración (hay que recalibrar). Los perfiles
+     * anteriores a guardar la potencia se hicieron todos con el firmware v2 a +9 dBm (nivel 7).
+     */
+    fun isStaleFor(currentTxLevel: Int?): Boolean = currentTxLevel != null && (txLevel ?: LEGACY_TX_LEVEL) != currentTxLevel
+
+    companion object {
+        /** Nivel de potencia de todas las calibraciones hechas antes del firmware v3 (+9 dBm). */
+        const val LEGACY_TX_LEVEL = 7
+    }
+}
 
 /** Decide cuándo la señal está "estable" para empezar a medir sola. */
 object StabilityDetector {
@@ -131,7 +144,7 @@ object ProfileFitter {
      * Ajusta RSSI = A₁ₘ − 10·n·log10(d) con los escenarios de frente (d ≥ 0,3 m) y calcula
      * asimetría, contacto y una nota de calidad con sus motivos.
      */
-    fun build(beacon: String, phoneModel: String, atMs: Long, results: List<ScenarioResult>): BeaconProfile {
+    fun build(beacon: String, phoneModel: String, atMs: Long, results: List<ScenarioResult>, txLevel: Int? = null): BeaconProfile {
         val contact = results.firstOrNull { it.kind == ScenarioKind.CONTACT }
         val front = results.filter { it.kind == ScenarioKind.FRONT && it.distanceM >= 0.3 }.sortedBy { it.distanceM }
         val reasons = mutableListOf<String>()
@@ -203,7 +216,8 @@ object ProfileFitter {
         return BeaconProfile(
             beacon, phoneModel, atMs, results,
             contact?.median, contact?.sd, a1m, n, resid, asym, rate,
-            worst, if (reasons.isEmpty()) listOf("Sin observaciones: la curva y el patrón son coherentes.") else reasons
+            worst, if (reasons.isEmpty()) listOf("Sin observaciones: la curva y el patrón son coherentes.") else reasons,
+            txLevel
         )
     }
 

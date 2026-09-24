@@ -102,4 +102,15 @@ class CalibrationModelTest {
         assertEquals(1 + p.results.size, lines.size)
         assertTrue(lines[1].startsWith("NAV_BLE_04,Xiaomi  test,A,"))
     }
+
+    @Test fun profileBecomesStaleWhenTxPowerChanges() {
+        // Calibrada a +9 dBm (nivel 7); el firmware v3 la baja a -3 dBm (nivel 3): hay que recalibrar.
+        val p = ProfileFitter.build("NAV_BLE_03", "test", 0L, ideal(a = -62.0, n = 2.0), txLevel = 7)
+        assertTrue(p.isStaleFor(3))
+        assertTrue(!p.isStaleFor(7))
+        assertTrue(!p.isStaleFor(null))   // baliza sin datos de fabricante: no se puede saber, no se avisa
+        val old = ProfileFitter.build("NAV_BLE_03", "test", 0L, ideal(a = -62.0, n = 2.0))
+        assertTrue(old.isStaleFor(3))     // perfiles anteriores sin potencia guardada = firmware v2 a +9 dBm (nivel 7)
+        assertTrue(!old.isStaleFor(7))
+    }
 }

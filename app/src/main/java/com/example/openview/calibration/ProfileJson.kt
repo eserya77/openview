@@ -11,7 +11,7 @@ object ProfileJson {
         put("contact", p.contactRssi ?: JSONObject.NULL); put("contactSd", p.contactSd ?: JSONObject.NULL)
         put("a1m", p.a1m ?: JSONObject.NULL); put("n", p.pathLossN ?: JSONObject.NULL)
         put("resid", p.fitResidualSd ?: JSONObject.NULL); put("asym", p.asymmetryDb ?: JSONObject.NULL)
-        put("rate", p.meanRatePerS); put("quality", p.quality.name)
+        put("rate", p.meanRatePerS); put("quality", p.quality.name); put("tx", p.txLevel ?: JSONObject.NULL)
         put("reasons", JSONArray().also { a -> p.reasons.forEach { a.put(it) } })
         put("results", JSONArray().also { a ->
             p.results.forEach { r ->
@@ -35,7 +35,8 @@ object ProfileJson {
         return BeaconProfile(
             o.getString("beacon"), o.optString("phone", ""), o.optLong("at", 0L), results,
             dbl("contact"), dbl("contactSd"), dbl("a1m"), dbl("n"), dbl("resid"), dbl("asym"),
-            o.optDouble("rate", 0.0), Quality.valueOf(o.getString("quality")), reasons
+            o.optDouble("rate", 0.0), Quality.valueOf(o.getString("quality")), reasons,
+            if (o.has("tx") && !o.isNull("tx")) o.getInt("tx") else null
         )
     }
 }
