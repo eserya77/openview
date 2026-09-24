@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -77,6 +78,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.openview.ble.BleDeviceInfo
 import com.example.openview.ble.BleScanner
 import com.example.openview.ble.hasBlePermissions
@@ -110,7 +112,7 @@ import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 private const val PRESENT_WINDOW_MS = 5_000L
-private enum class AdminPage { HOME, ROUTES, BEACONS, EDITOR, REPLAY, GUIDED }
+private enum class AdminPage { HOME, ROUTES, BEACONS, EDITOR, REPLAY, GUIDED, CALIBRATE }
 
 /** Centro de control local de las rutas y balizas del edificio. */
 @Composable
@@ -119,22 +121,45 @@ fun AdminBleScreen(scanner: BleScanner, onBack: () -> Unit) {
     val scan by scanner.state.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     var hasPermission by remember { mutableStateOf(hasBlePermissions(context)) }
+    var paused by remember { mutableStateOf(false) }
     var page by remember { mutableStateOf(AdminPage.HOME) }
     var editingRouteId by remember { mutableStateOf<String?>(null) }
     var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
-        hasPermission = granted.values.all { it }; if (hasPermission) scanner.startScan()
+        hasPermission = granted.values.all { it }
     }
+    val enableBluetooth = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { scanner.refreshBluetoothState() }
     LaunchedEffect(Unit) { while (true) { now = SystemClock.elapsedRealtime(); delay(1000) } }
     LaunchedEffect(scan.targets) { scan.targets.mapNotNull { it.name }.forEach(RouteRepository::rememberBeacon) }
-    val startScan = { if (hasPermission) { scanner.refreshBluetoothState(); scanner.startScan() } else launcher.launch(requiredBlePermissions()) }
+
+    // El escaneo arranca solo al entrar al panel y se vigila mientras esté abierto (si Android lo deja mudo, se reinicia).
+    // Al salir se apaga: la navegación normal gestiona el suyo.
+    LaunchedEffect(hasPermission, paused) {
+        when {
+            paused -> scanner.stopKeepAlive()
+            hasPermission -> scanner.startKeepAlive()
+            else -> launcher.launch(requiredBlePermissions())
+        }
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { scanner.stopKeepAlive() } }
+
+    val detected = scan.targets.count { now - it.lastSeenElapsedMs <= PRESENT_WINDOW_MS }
+    val statusBar: @Composable () -> Unit = {
+        ScanStatusBar(
+            scan = scan, detected = detected, hasPermission = hasPermission, paused = paused,
+            onTogglePause = { paused = !paused },
+            onGrant = { launcher.launch(requiredBlePermissions()) },
+            onEnableBluetooth = { enableBluetooth.launch(android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE)) }
+        )
+    }
 
     when (page) {
-        AdminPage.HOME -> AdminHome(catalog.routes.firstOrNull { it.id == catalog.activeRouteId }, catalog.beacons.count { it.enabled }, catalog.beacons.size, { page = AdminPage.ROUTES }, { page = AdminPage.BEACONS }, { page = AdminPage.REPLAY }, { page = AdminPage.GUIDED }, onBack)
+        AdminPage.HOME -> AdminHome(catalog.routes.firstOrNull { it.id == catalog.activeRouteId }, catalog.beacons.count { it.enabled }, catalog.beacons.size, catalog.beacons.count { it.profile != null }, statusBar, { page = AdminPage.ROUTES }, { page = AdminPage.BEACONS }, { page = AdminPage.REPLAY }, { page = AdminPage.GUIDED }, { page = AdminPage.CALIBRATE }, onBack)
         AdminPage.ROUTES -> RouteList(catalog.routes, catalog.activeRouteId, { page = AdminPage.HOME }, { id -> editingRouteId = id; page = AdminPage.EDITOR }, { id -> editingRouteId = id; page = AdminPage.EDITOR }, RouteRepository::activate)
-        AdminPage.BEACONS -> BeaconInventory(catalog.beacons, scan.targets, scan.isScanning, scan.error, now, hasPermission, scanner, { page = AdminPage.HOME }, startScan, scanner::stopScan, RouteRepository::setBeaconEnabled)
+        AdminPage.BEACONS -> BeaconInventory(catalog.beacons, scan.targets, now, scanner, statusBar, { page = AdminPage.HOME }, RouteRepository::setBeaconEnabled)
         AdminPage.REPLAY -> ReplayScreen(onBack = { page = AdminPage.HOME })
-        AdminPage.GUIDED -> GuidedTestScreen(scanner, startScan, onBack = { page = AdminPage.HOME })
+        AdminPage.GUIDED -> GuidedTestScreen(scanner, statusBar, onBack = { page = AdminPage.HOME })
+        AdminPage.CALIBRATE -> CalibrationWizardScreen(scanner, statusBar, onBack = { page = AdminPage.HOME })
         AdminPage.EDITOR -> {
             val route = catalog.routes.firstOrNull { it.id == editingRouteId }
             if (route == null) page = AdminPage.ROUTES else RouteEditor(route, catalog.beacons, catalog.activeRouteId, { page = AdminPage.ROUTES }, RouteRepository::activate, RouteRepository::renameRoute, { RouteRepository.deleteRoute(it); page = AdminPage.ROUTES }, RouteRepository::addNode, RouteRepository::updateNode, RouteRepository::removeNode, RouteRepository::connect, RouteRepository::disconnect, RouteRepository.validate(route.id))
@@ -142,19 +167,57 @@ fun AdminBleScreen(scanner: BleScanner, onBack: () -> Unit) {
     }
 }
 
+/** Tarjeta de acceso: icono, título y una línea que explica para qué sirve. Alto fijo. */
 @Composable
-private fun AdminHome(active: SavedRoute?, usable: Int, total: Int, onRoutes: () -> Unit, onBeacons: () -> Unit, onReplay: () -> Unit, onGuided: () -> Unit, onBack: () -> Unit) {
-    ScreenScaffold(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Spacer(Modifier.height(8.dp)); ScreenTitle("Administración")
-        Text("Configura el espacio antes de guiar a una persona. Las rutas se guardan solo en este teléfono.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        AdminSummary("Ruta activa", active?.name ?: "Sin ruta", Icons.Filled.Route, SuccessGreen)
-        AdminSummary("Balizas disponibles", "$usable de $total", Icons.Filled.Bluetooth, if (usable >= 3) SuccessGreen else FailureRed)
-        PrimaryActionButton("Gestionar rutas", icon = Icons.Filled.Route, onClick = onRoutes)
-        PrimaryActionButton("Prueba guiada (recomendada)", icon = Icons.Filled.FiberManualRecord, onClick = onGuided)
-        SecondaryActionButton("Probar y administrar balizas", icon = Icons.Filled.Radar, onClick = onBeacons)
-        SecondaryActionButton("Replay y sandbox de calibración", icon = Icons.Filled.History, onClick = onReplay)
-        Text("Primero prueba las balizas. Luego crea una ruta, agrega sus puntos y actívala cuando no tenga errores.", textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun AdminEntry(step: Int?, title: String, subtitle: String, icon: androidx.compose.ui.graphics.vector.ImageVector, color: Color, onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(20.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth().height(88.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+            IconTile(icon, color, 52.dp)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text((if (step != null) "$step · " else "") + title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, minLines = 2, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdminHome(active: SavedRoute?, usable: Int, total: Int, profiled: Int, statusBar: @Composable () -> Unit, onRoutes: () -> Unit, onBeacons: () -> Unit, onReplay: () -> Unit, onGuided: () -> Unit, onCalibrate: () -> Unit, onBack: () -> Unit) {
+    ScreenScaffold(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        ScreenTitle("Administración")
+        statusBar()
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            AdminStatTile("Ruta activa", active?.name ?: "Sin ruta", if (active != null) AdminColors.good else AdminColors.warn, Modifier.weight(1f))
+            AdminStatTile("Balizas", "$usable de $total", if (usable >= 3) AdminColors.good else AdminColors.bad, Modifier.weight(1f))
+            AdminStatTile("Calibradas", "$profiled de $total", if (profiled >= usable && usable > 0) AdminColors.good else AdminColors.warn, Modifier.weight(1f))
+        }
+        Text("Orden recomendado", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth())
+        AdminEntry(1, "Calibrar balizas", "Un asistente con mapa te guía por distancias y ángulos.", Icons.Filled.Tune, MaterialTheme.colorScheme.primary, onCalibrate)
+        AdminEntry(2, "Prueba guiada", "Recorre las posiciones, rota las placas y mide el acierto.", Icons.Filled.FiberManualRecord, AdminColors.bad, onGuided)
+        AdminEntry(3, "Rutas", "Crea el plano de puntos y activa la ruta cuando esté lista.", Icons.Filled.Route, AdminColors.good, onRoutes)
+        Text("Herramientas", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth())
+        AdminEntry(null, "Balizas y registro", "Señal de cada baliza en vivo, activarlas y grabar CSV.", Icons.Filled.Radar, AdminColors.beacon, onBeacons)
+        AdminEntry(null, "Replay", "Repite una prueba grabada con otro algoritmo o ajuste.", Icons.Filled.History, MaterialTheme.colorScheme.secondary, onReplay)
         SecondaryActionButton("Volver", icon = Icons.AutoMirrored.Filled.ArrowBack, onClick = onBack)
+    }
+}
+
+/** Dato corto del resumen: etiqueta y valor en una línea cada uno, alto fijo. */
+@Composable
+private fun AdminStatTile(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
+    Column(
+        modifier.height(72.dp).background(color.copy(alpha = .12f), RoundedCornerShape(16.dp)).padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = color, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
     }
 }
 
@@ -195,20 +258,18 @@ private fun RouteList(routes: List<SavedRoute>, activeId: String, onBack: () -> 
 }
 
 @Composable
-private fun BeaconInventory(beacons: List<ManagedBeacon>, scanned: List<BleDeviceInfo>, scanning: Boolean, error: String?, now: Long, hasPermission: Boolean, scanner: BleScanner, onBack: () -> Unit, onStart: () -> Unit, onStop: () -> Unit, onSetEnabled: (String, Boolean) -> Unit) {
+private fun BeaconInventory(beacons: List<ManagedBeacon>, scanned: List<BleDeviceInfo>, now: Long, scanner: BleScanner, statusBar: @Composable () -> Unit, onBack: () -> Unit, onSetEnabled: (String, Boolean) -> Unit) {
     val found = scanned.mapNotNull { it.name?.let { name -> name to it } }.toMap()
     var calibrating by remember { mutableStateOf<String?>(null) }
     ScreenScaffold(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         ScreenTitle("Balizas")
-        Text("Una baliza desactivada no participa en la ubicación ni permite activar rutas que dependan de ella. Puedes volver a habilitar NAV_BLE_02 cuando quieras probarla.", style = MaterialTheme.typography.bodyLarge)
-        RecordingPanel()
-        error?.let { ProblemsCard(listOf(it)) }
-        if (scanning) PrimaryActionButton("Detener prueba", icon = Icons.Filled.Stop, containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError, onClick = onStop) else PrimaryActionButton("Probar balizas cercanas", icon = Icons.Filled.Radar, onClick = onStart)
-        if (!hasPermission) Text("Al iniciar se solicitará permiso de Bluetooth cercano.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        statusBar()
+        Text("Una baliza desactivada no participa en la ubicación ni permite activar rutas que dependan de ella.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         beacons.sortedBy { it.name }.forEach {
             val present = found[it.name]?.let { d -> now - d.lastSeenElapsedMs <= PRESENT_WINDOW_MS } == true
             BeaconCard(it, found[it.name], present, onSetEnabled, onCalibrate = { name -> calibrating = name })
         }
+        RecordingPanel()
         SecondaryActionButton("Volver", icon = Icons.AutoMirrored.Filled.ArrowBack, onClick = onBack)
     }
     calibrating?.let { name ->
@@ -266,10 +327,9 @@ private fun RecordingPanel() {
                 // Leer 'tick' aquí hace que Compose recomponga este texto cada
                 // segundo mientras graba (lo actualiza el LaunchedEffect de arriba).
                 val elapsed = if (tick >= 0L) BleSessionLogger.elapsedSeconds() else 0.0
-                Text(
+                SlotText(
                     "Grabando «${session.sessionName}» · ${"%.0f".format(elapsed)} s · ${session.rowCount} lecturas · ${session.trueMarkCount} verdades marcadas",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold
+                    minLines = 3, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold
                 )
                 CalibrationMap(ActiveGraph.graph)
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -454,14 +514,11 @@ private fun CalibrationMap(graph: NavGraph) {
                 }
             }
         }
-        lastMarked?.let { (x, y) ->
-            Text(
-                "Última verdad marcada: (${"%.2f".format(x)}, ${"%.2f".format(y)}) m · $lastMarkedLabel",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        LiveReadout(live)
+        SlotText(
+            lastMarked?.let { (x, y) -> "Última verdad marcada: (${"%.2f".format(x)}, ${"%.2f".format(y)}) m · $lastMarkedLabel" },
+            minLines = 1, style = MaterialTheme.typography.bodySmall
+        )
+        LiveReadout(live, nodes.mapNotNull { it.beaconName }.distinct().sorted())
     }
 }
 
@@ -482,23 +539,21 @@ private fun SignalPill(signal: BleSignal?) {
 
 /** Lista compacta de RSSI crudo/suavizado y distancia por baliza visible, para ver de un vistazo cuál tiembla. */
 @Composable
-private fun LiveReadout(live: BlePositioner.Result?) {
-    val readings = live?.readings.orEmpty().sortedByDescending { it.rssiSmoothed }
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (readings.isEmpty()) {
-            Text("Sin balizas visibles en este momento.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else {
-            readings.forEach { r ->
-                val bars = signalBarsForRssi(r.rssiRaw)
-                val dist = if (r.estimatedDistanceM < 1) "${(r.estimatedDistanceM * 100).toInt()} cm" else "%.1f m".format(r.estimatedDistanceM)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(r.beaconName, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                    Text("${r.rssiRaw} → ${r.rssiSmoothed.toInt()} dBm", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.width(8.dp))
-                    Text(dist, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.width(8.dp))
-                    Row { repeat(4) { i -> Box(Modifier.padding(end = 2.dp).size(width = 4.dp, height = 10.dp).background(if (i < bars) Color(0xFFB8720A) else MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(1.dp))) } }
-                }
+private fun LiveReadout(live: BlePositioner.Result?, names: List<String>) {
+    val byName = live?.readings.orEmpty().associateBy { it.beaconName }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (names.isEmpty()) {
+            Text("El grafo activo no tiene balizas.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        names.forEach { n ->
+            val r = byName[n]
+            val dist = r?.let { if (it.estimatedDistanceM < 1) "${(it.estimatedDistanceM * 100).toInt()} cm" else "%.1f m".format(it.estimatedDistanceM) } ?: "—"
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().height(26.dp)) {
+                Text(n, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1)
+                Text(r?.let { "${it.rssiRaw} → ${it.rssiSmoothed.toInt()} dBm" } ?: "—", style = NumberStyle.copy(fontSize = 12.sp), color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(116.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                Text(dist, style = NumberStyle.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold), modifier = Modifier.width(64.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                Spacer(Modifier.width(8.dp))
+                SignalBars(r?.rssiRaw)
             }
         }
     }
@@ -506,28 +561,31 @@ private fun LiveReadout(live: BlePositioner.Result?) {
 
 @Composable
 private fun BeaconCard(beacon: ManagedBeacon, device: BleDeviceInfo?, present: Boolean, onSetEnabled: (String, Boolean) -> Unit, onCalibrate: (String) -> Unit) {
-    val color = when { !beacon.enabled -> MaterialTheme.colorScheme.onSurfaceVariant; present -> SuccessGreen; else -> FailureRed }
-    Card(colors = CardDefaults.cardColors(containerColor = color.copy(alpha = .10f)), modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(if (present) Icons.Filled.CheckCircle else Icons.Filled.Bluetooth, null, tint = color, modifier = Modifier.size(28.dp)); Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(beacon.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text(when { !beacon.enabled -> "No se usará en rutas"; present && device != null -> "Detectada · ${device.rssi} dBm · ${device.signalLabel}"; else -> "No detectada en esta prueba" }, style = MaterialTheme.typography.bodyMedium, color = color)
-                    Text(
-                        (beacon.measuredPowerAt1m?.let { "Calibrada: $it dBm a 1 m" } ?: "Sin calibrar (usa la referencia global)") +
-                            (device?.fwVersion?.let { " · firmware v$it" } ?: "") +
-                            (device?.txLevel?.let { " · TX ${-12 + 3 * it} dBm" } ?: ""),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(checked = beacon.enabled, onCheckedChange = { onSetEnabled(beacon.name, it) })
+    val color = when { !beacon.enabled -> MaterialTheme.colorScheme.onSurfaceVariant; present -> AdminColors.good; else -> AdminColors.bad }
+    AdminCard(container = color.copy(alpha = .06f), modifier = Modifier.semantics(mergeDescendants = true) {}) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().height(64.dp)) {
+            BeaconNumberBadge(beacon.name, color, 48.dp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(beacon.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+                Text(
+                    when { !beacon.enabled -> "No se usará en rutas"; present && device != null -> "Detectada · ${device.signalLabel}"; else -> "No detectada" },
+                    style = MaterialTheme.typography.bodyMedium, color = color, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
             }
-            OutlinedButton(onClick = { onCalibrate(beacon.name) }, enabled = present, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Filled.Tune, null); Spacer(Modifier.width(8.dp))
-                Text(if (present) "Calibrar a 1 metro" else "Acércate a la baliza para calibrarla")
-            }
+            RssiReadout(if (present && beacon.enabled) device?.rssi else null, big = false, color = color)
+            Switch(checked = beacon.enabled, onCheckedChange = { onSetEnabled(beacon.name, it) })
+        }
+        SlotText(
+            (beacon.measuredPowerAt1m?.let { "Calibrada: $it dBm a 1 m" } ?: "Sin calibrar (usa la referencia global)") +
+                (beacon.profile?.let { " · perfil ${it.quality.label}" } ?: "") +
+                (device?.fwVersion?.let { " · firmware v$it" } ?: "") +
+                (device?.txLevel?.let { " · TX ${-12 + 3 * it} dBm" } ?: ""),
+            minLines = 2, style = MaterialTheme.typography.bodySmall
+        )
+        OutlinedButton(onClick = { onCalibrate(beacon.name) }, enabled = present, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+            Icon(Icons.Filled.Tune, null); Spacer(Modifier.width(8.dp))
+            Text(if (present) "Calibrar a 1 metro (rápido)" else "Acércate para calibrarla", maxLines = 1)
         }
     }
 }
@@ -579,7 +637,7 @@ private fun CalibrationDialog(scanner: BleScanner, beaconName: String, currentCa
         onDismissRequest = onDismiss,
         title = { Text("Calibrar $beaconName") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(Modifier.heightIn(min = 150.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 when (phase) {
                     CalibrationPhase.READY -> {
                         Text("Párate exactamente a 1 metro de $beaconName, con el móvil en la mano como lo llevarás normalmente, y mantente quieto durante $CALIBRATION_SECONDS segundos.")
@@ -692,6 +750,7 @@ private fun ReplayScreen(onBack: () -> Unit) {
     var sourceLabel by remember { mutableStateOf("") }
     var alpha by remember { mutableFloatStateOf(0.5f) }
     var margin by remember { mutableFloatStateOf(4f) }
+    var algorithm by remember { mutableStateOf(com.example.openview.nav.Algorithm.V3) }
     var frameIndex by remember { mutableIntStateOf(0) }
     var playing by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -710,10 +769,23 @@ private fun ReplayScreen(onBack: () -> Unit) {
         }
     }
 
-    val graph = ActiveGraph.graph
-    val frames = remember(rows, alpha, margin) {
+    // Contexto del replay: si el log trae fila LAYOUT (prueba guiada) se reconstruye ese escenario, esa rotación
+    // y sus huellas; si no, se usa la ruta activa.
+    val setupsState by com.example.openview.data.TestSetupRepository.state.collectAsState()
+    val layoutInfo = remember(rows) { com.example.openview.logging.LayoutInfo.fromRows(rows) }
+    val layoutSetup = layoutInfo?.let { li -> setupsState.setups.firstOrNull { it.id == li.setupId } }
+    val layoutRotation = layoutInfo?.let { li -> layoutSetup?.let { li.rotationFor(it) } }
+    val graph = if (layoutSetup != null && layoutRotation != null) com.example.openview.data.TestLayout.graph(layoutSetup, layoutRotation) else ActiveGraph.graph
+    val path: List<String>? = if (layoutRotation != null) graph.nodes.map { it.id } else ActiveGraph.expectedPath ?: graph.nodes.map { it.id }.takeIf { it.size >= 2 }
+    val layoutKey = if (layoutSetup != null && layoutInfo != null) layoutInfo.keyFor(layoutSetup) else null
+    val storedLaps by com.example.openview.data.FingerprintRepository.laps.collectAsState()
+    val fingerprints = layoutKey?.let { com.example.openview.data.FingerprintRepository.setFor(it) }
+    val frames = remember(rows, alpha, margin, algorithm, layoutKey, storedLaps) {
         if (rows.isEmpty()) emptyList()
-        else ReplayEngine.run(rows, TrackerParams(alpha = alpha.toDouble(), marginDb = margin.toDouble()), graph, RouteRepository::calibrationFor)
+        else ReplayEngine.run(
+            rows, TrackerParams(alpha = alpha.toDouble(), marginDb = margin.toDouble()), graph, RouteRepository::calibrationFor,
+            algorithm, path, fingerprints, RouteRepository::profileFor
+        )
     }
     LaunchedEffect(frames.size) { if (frameIndex >= frames.size) frameIndex = (frames.size - 1).coerceAtLeast(0) }
     LaunchedEffect(playing, frames.size) {
@@ -767,6 +839,21 @@ private fun ReplayScreen(onBack: () -> Unit) {
                 Slider(value = margin, onValueChange = { margin = it }, valueRange = 0f..12f)
             }
 
+            Text(
+                if (layoutInfo != null && layoutRotation != null)
+                    "Prueba guiada: ${layoutInfo.setupId} · ${layoutInfo.rotationId} · " + layoutInfo.beaconAt.entries.joinToString(" ") { "${it.key}=${it.value.takeLast(2)}" } +
+                        " · parada ${layoutInfo.stay} · " + (if (fingerprints != null) "huellas: ${fingerprints.laps} vuelta(s)" else "sin huellas guardadas para esta disposición")
+                else "Log sin datos de escenario: se usa la ruta activa.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                com.example.openview.nav.Algorithm.entries.forEach { a ->
+                    val label = if (a == com.example.openview.nav.Algorithm.V3) "v3 (ruta + huella)" else "v2 (más fuerte + histéresis)"
+                    if (a == algorithm) Button(onClick = {}, modifier = Modifier.weight(1f)) { Text(label, style = MaterialTheme.typography.labelMedium) }
+                    else OutlinedButton(onClick = { algorithm = a }, modifier = Modifier.weight(1f)) { Text(label, style = MaterialTheme.typography.labelMedium) }
+                }
+            }
+            ReplayAccuracy(rows, graph, frames)
             ErrorSummary(frames)
             ReplayMap(graph, frames, frameIndex)
 
@@ -788,6 +875,30 @@ private fun ReplayScreen(onBack: () -> Unit) {
         }
 
         SecondaryActionButton("Volver", icon = Icons.AutoMirrored.Filled.ArrowBack, onClick = onBack)
+    }
+}
+
+/** Acierto por punto del replay, según las marcas ARRIVE/DEPART del log (solo si el log las trae). */
+@Composable
+private fun ReplayAccuracy(rows: List<BleLogRow>, graph: NavGraph, frames: List<ReplayFrame>) {
+    val beaconOfNode = graph.nodes.mapNotNull { n -> n.beaconName?.let { n.id to it } }.toMap()
+    val summary = remember(rows, frames) {
+        com.example.openview.logging.SessionAnalyzer.analyze(rows, beaconOfNode, frames.map { com.example.openview.logging.Detection(it.timestampS, it.nodeId) })
+    }
+    if (summary.points.isEmpty()) return
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("Acierto por punto (marcas del log)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            Text(
+                "Medio: %.0f %% · cambios: %d · %s".format(summary.meanAccuracyPct, summary.totalFlips,
+                    if (summary.falseArrival) "falso destino %.1f s".format(summary.wrongDestinationS) else "sin falso destino"),
+                style = MaterialTheme.typography.bodyMedium
+            )
+            summary.points.forEach { p ->
+                val label = graph.nodes.firstOrNull { it.id == p.nodeId }?.let { "${it.label} (${it.beaconName?.takeLast(2)})" } ?: p.nodeId
+                Text("· $label: %.0f %%".format(p.accuracyPct) + (p.wrongNode?.let { " · confunde con $it" } ?: ""), style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 }
 

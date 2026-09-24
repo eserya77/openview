@@ -77,6 +77,9 @@ fun OpenViewApp(
         tts.volume = state.voiceSettings.volume
     }
 
+    // El posicionador v3 usa el orden de la ruta activa (solo avanza al siguiente punto).
+    LaunchedEffect(state.routePath) { com.example.openview.data.ActiveGraph.routePath = state.routePath }
+
     // Convierte las señales BLE en posición (nodo del grafo) y la pasa al ViewModel.
     // Se alimenta por MUESTRAS (una por anuncio recibido) y por un reloj de 250 ms que hace
     // caducar balizas y confirmar nodos por tiempo.

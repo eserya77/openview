@@ -2,7 +2,11 @@ package com.example.openview.logging
 
 import com.example.openview.data.BleSignal
 import com.example.openview.data.NavGraph
+import com.example.openview.calibration.BeaconProfile
+import com.example.openview.nav.Algorithm
 import com.example.openview.nav.BlePositioner
+import com.example.openview.nav.FingerprintSet
+import com.example.openview.nav.RouteParams
 import com.example.openview.nav.TrackerParams
 import kotlin.math.hypot
 
@@ -50,13 +54,17 @@ object ReplayEngine {
         rows: List<BleLogRow>,
         params: TrackerParams,
         graph: NavGraph,
-        reference: (String) -> Int
+        reference: (String) -> Int,
+        algorithm: Algorithm = Algorithm.V2,
+        path: List<String>? = null,
+        fingerprints: FingerprintSet? = null,
+        profile: (String) -> BeaconProfile? = { null }
     ): List<ReplayFrame> {
         if (rows.isEmpty()) return emptyList()
 
         val filled = GroundTruth.fill(rows.sortedBy { it.timestampS })
         val marks = GroundTruth.marksFrom(filled)
-        val positioner = BlePositioner(params, { graph }, reference)
+        val positioner = BlePositioner(params, { graph }, reference, algorithm, RouteParams(), { path }, { fingerprints }, profile)
 
         val lastRaw = mutableMapOf<String, Int>()
         val frames = mutableListOf<ReplayFrame>()

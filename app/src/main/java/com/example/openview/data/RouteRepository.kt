@@ -2,6 +2,8 @@ package com.example.openview.data
 
 import android.content.Context
 import com.example.openview.ble.RSSI_AT_ONE_METER
+import com.example.openview.calibration.BeaconProfile
+import com.example.openview.calibration.ProfileJson
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,7 +29,13 @@ data class SavedRoute(
  * particular. `null` significa "usa la constante global" ([com.example.openview.ble.RSSI_AT_ONE_METER]),
  * que es lo normal hasta que alguien la calibra a mano desde el panel admin.
  */
-data class ManagedBeacon(val name: String, val enabled: Boolean = true, val measuredPowerAt1m: Int? = null)
+data class ManagedBeacon(
+    val name: String,
+    val enabled: Boolean = true,
+    val measuredPowerAt1m: Int? = null,
+    /** Perfil completo del asistente de calibración (contacto, curva, asimetría, calidad). Null si no se ha calibrado con él. */
+    val profile: BeaconProfile? = null
+)
 
 data class RouteCatalog(
     val routes: List<SavedRoute>,
@@ -150,6 +158,23 @@ object RouteRepository {
         catalog.copy(beacons = updated.sortedBy { it.name })
     }
 
+    /**
+     * Guarda el perfil del asistente de calibración y aplica su A₁ₘ (redondeado) como referencia a 1 m
+     * de la baliza, para que toda la app (distancias, RSSI relativo) use un valor medido de verdad.
+     */
+    fun saveProfile(profile: BeaconProfile) = updateCatalog { catalog ->
+        val normalized = profile.beacon.uppercase()
+        val a1 = profile.a1m?.let { Math.round(it).toInt() }
+        val current = catalog.beacons
+        val updated = if (current.any { it.name == normalized }) {
+            current.map { if (it.name == normalized) it.copy(profile = profile, measuredPowerAt1m = a1 ?: it.measuredPowerAt1m) else it }
+        } else current + ManagedBeacon(normalized, measuredPowerAt1m = a1, profile = profile)
+        catalog.copy(beacons = updated.sortedBy { it.name })
+    }
+
+    fun profileFor(beaconName: String): BeaconProfile? =
+        _catalog.value.beacons.firstOrNull { it.name == beaconName.uppercase() }?.profile
+
     fun rememberBeacon(name: String) {
         val normalized = name.uppercase()
         if (!normalized.startsWith("NAV_BLE_")) return
@@ -203,7 +228,8 @@ object RouteRepository {
         val root = JSONObject().put("active", catalog.activeRouteId)
         root.put("beacons", JSONArray().apply {
             catalog.beacons.forEach {
-                put(JSONObject().put("name", it.name).put("enabled", it.enabled).put("calibration", it.measuredPowerAt1m ?: JSONObject.NULL))
+                put(JSONObject().put("name", it.name).put("enabled", it.enabled).put("calibration", it.measuredPowerAt1m ?: JSONObject.NULL)
+                    .put("profile", it.profile?.let { p -> ProfileJson.toJson(p) } ?: JSONObject.NULL))
             }
         })
         root.put("routes", JSONArray().apply {
@@ -226,7 +252,8 @@ object RouteRepository {
             ManagedBeacon(
                 it.getString("name"),
                 it.optBoolean("enabled", true),
-                if (it.has("calibration") && !it.isNull("calibration")) it.getInt("calibration") else null
+                if (it.has("calibration") && !it.isNull("calibration")) it.getInt("calibration") else null,
+                if (it.has("profile") && !it.isNull("profile")) runCatching { ProfileJson.fromJson(it.getJSONObject("profile")) }.getOrNull() else null
             )
         }
         val routes = root.getJSONArray("routes").mapObjects { obj ->

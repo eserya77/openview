@@ -76,11 +76,29 @@ object ActiveGraph {
      */
     private var previewPreset: GraphPreset? = null
 
+    // Grafo temporal de la prueba guiada (posiciones físicas + rotación de balizas). Tiene prioridad
+    // sobre todo mientras esa pantalla está abierta, y se limpia al salir.
+    private var temporaryGraph: NavGraph? = null
+    private var temporaryPath: List<String>? = null
+
+    /** Ruta que está recorriendo la persona en la navegación normal (ids de nodo, en orden). Vacía si no hay ruta. */
+    @Volatile var routePath: List<String> = emptyList()
+
+    /** Se incrementa para pedir al posicionador que olvide su progreso (p. ej. al empezar una vuelta de prueba). */
+    @Volatile var resetToken: Int = 0
+
+    /**
+     * Orden esperado de los puntos: el de la prueba guiada si está abierta; si no, la ruta activa
+     * (si tiene al menos 2 nodos). Null = no hay orden conocido y el posicionador usa el seguidor por vecinos.
+     */
+    val expectedPath: List<String>? get() = temporaryPath ?: routePath.takeIf { it.size >= 2 }
+
     val preset: GraphPreset get() = previewPreset ?: GraphPresets.default
-    val graph: NavGraph get() = previewPreset?.graph ?: RouteRepository.activeGraph
+    val graph: NavGraph get() = temporaryGraph ?: previewPreset?.graph ?: RouteRepository.activeGraph
     val startNode: String get() = graph.nodes.firstOrNull()?.id ?: "inicio"
     val destinationNode: String get() = graph.nodes.lastOrNull()?.id ?: "destino"
 
+    fun useTemporary(g: NavGraph?, path: List<String>? = g?.nodes?.map { it.id }) { temporaryGraph = g; temporaryPath = if (g == null) null else path }
     fun select(p: GraphPreset) { previewPreset = p }
     fun useConfiguredRoute() { previewPreset = null }
 }

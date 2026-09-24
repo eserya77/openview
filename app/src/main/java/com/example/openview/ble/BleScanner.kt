@@ -17,7 +17,13 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -33,6 +39,15 @@ const val TARGET_SERVICE_UUID = "12345678-1234-1234-1234-123456789001"
 
 /** Tiempo (ms) tras el cual un dispositivo se considera "perdido" si no se vuelve a ver. */
 private const val DEVICE_TIMEOUT_MS = 4_000L
+
+/**
+ * Vigilancia opcional del escaneo ([BleScanner.startKeepAlive]): Android (y sobre todo las capas de Xiaomi) puede dejar de
+ * entregar resultados sin avisar. Si pasa este tiempo sin ningún anuncio, o sin ninguna baliza habiendo visto alguna antes,
+ * el escaneo se reinicia. El mínimo entre reinicios queda muy por debajo del límite de Android (5 arranques cada 30 s).
+ */
+private const val SILENCE_RESTART_MS = 6_000L
+private const val TARGET_SILENCE_RESTART_MS = 12_000L
+private const val RESTART_MIN_GAP_MS = 8_000L
 
 /** Company ID de los datos de fabricante del firmware v2 (0xFFFF = uso interno). */
 private const val BEACON_COMPANY_ID = 0xFFFF
@@ -118,7 +133,9 @@ data class BleScanState(
     val bluetoothEnabled: Boolean = false,
     val isScanning: Boolean = false,
     val devices: List<BleDeviceInfo> = emptyList(),
-    val error: String? = null
+    val error: String? = null,
+    /** Cuántas veces la vigilancia tuvo que reiniciar el escaneo desde que se activó. */
+    val restarts: Int = 0
 ) {
     val target: BleDeviceInfo? get() = devices.firstOrNull { it.isTarget }
 
@@ -147,6 +164,13 @@ class BleScanner(private val context: Context) {
     // entregarlos como dos resultados separados y uno de ellos vendría sin nombre.
     private val nameByAddress = mutableMapOf<String, String>()
 
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var watchdog: Job? = null
+    private var wantScanning = false
+    private var lastResultMs = 0L
+    private var lastTargetMs = 0L
+    private var lastStartMs = 0L
+
     private val _samples = MutableSharedFlow<BleSample>(extraBufferCapacity = 512, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     /** Un evento por cada anuncio recibido de una baliza NAV_BLE_*. */
     val samples: SharedFlow<BleSample> = _samples.asSharedFlow()
@@ -155,6 +179,8 @@ class BleScanner(private val context: Context) {
         override fun onScanResult(callbackType: Int, result: ScanResult) = handleResult(result)
         override fun onBatchScanResults(results: MutableList<ScanResult>) = results.forEach(::handleResult)
         override fun onScanFailed(errorCode: Int) {
+            // 1 = ya estaba iniciado: no es un fallo, el escaneo sigue vivo.
+            if (errorCode == ScanCallback.SCAN_FAILED_ALREADY_STARTED) return
             _state.update { it.copy(isScanning = false, error = "El escaneo falló (código $errorCode).") }
         }
     }
@@ -181,6 +207,8 @@ class BleScanner(private val context: Context) {
         if (name == null && isTarget) name = nameByAddress[address]
 
         val now = SystemClock.elapsedRealtime()
+        lastResultMs = now
+        if (isTarget) lastTargetMs = now
         val previous = seen[address]
         seen[address] = BleDeviceInfo(
             address = address,
@@ -206,25 +234,42 @@ class BleScanner(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startScan() {
+        wantScanning = true
+        beginScan(clear = true)
+    }
+
+    /** Arranca el escaneo si aún no corre y NO borra lo ya detectado. Es seguro llamarlo varias veces. */
+    fun ensureScanning() {
+        wantScanning = true
+        if (!_state.value.isScanning) beginScan(clear = false)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun beginScan(clear: Boolean) {
         val adapter = adapter
         if (adapter == null) {
             _state.update { it.copy(supported = false, error = "Este dispositivo no soporta Bluetooth LE.") }
             return
         }
         if (!adapter.isEnabled) {
-            _state.update { it.copy(bluetoothEnabled = false, error = "Activa el Bluetooth para escanear.") }
+            _state.update { it.copy(bluetoothEnabled = false, isScanning = false, error = "Activa el Bluetooth para escanear.") }
             return
         }
+        // Si quedó un escaneo previo (reinicio), se detiene antes para no duplicar el callback.
+        runCatching { scanner?.stopScan(callback) }
         scanner = adapter.bluetoothLeScanner
-        seen.clear()
-        nameByAddress.clear()
+        if (clear) { seen.clear(); nameByAddress.clear() }
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
+        val now = SystemClock.elapsedRealtime()
+        lastStartMs = now
+        lastResultMs = now
+        lastTargetMs = 0L
         try {
             scanner?.startScan(null, settings, callback)
             _state.update {
-                it.copy(isScanning = true, bluetoothEnabled = true, devices = emptyList(), error = null)
+                it.copy(isScanning = true, bluetoothEnabled = true, devices = if (clear) emptyList() else it.devices, error = null)
             }
         } catch (e: SecurityException) {
             _state.update { it.copy(isScanning = false, error = "Faltan permisos de Bluetooth.") }
@@ -233,8 +278,54 @@ class BleScanner(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun stopScan() {
+        wantScanning = false
         runCatching { scanner?.stopScan(callback) }
         _state.update { it.copy(isScanning = false) }
+    }
+
+    /**
+     * Escaneo automático y vigilado (lo usa el panel de administración): arranca solo, quita de la lista las balizas
+     * que dejan de oírse aunque no llegue ningún anuncio nuevo, y reinicia el escaneo si Android lo deja mudo.
+     */
+    fun startKeepAlive() {
+        ensureScanning()
+        if (watchdog?.isActive == true) return
+        watchdog = scope.launch {
+            while (true) {
+                delay(1_000)
+                refreshBluetoothState()
+                val now = SystemClock.elapsedRealtime()
+                pruneStale(now)
+                if (!wantScanning) continue
+                if (adapter?.isEnabled != true) {
+                    if (_state.value.isScanning) _state.update { it.copy(isScanning = false, error = "Activa el Bluetooth para escanear.") }
+                    continue
+                }
+                val sinceStart = now - lastStartMs
+                val running = _state.value.isScanning
+                val silent = now - lastResultMs >= SILENCE_RESTART_MS
+                val targetsLost = lastTargetMs > 0L && now - lastTargetMs >= TARGET_SILENCE_RESTART_MS
+                if (sinceStart >= RESTART_MIN_GAP_MS && (!running || silent || targetsLost)) {
+                    beginScan(clear = false)
+                    _state.update { it.copy(restarts = it.restarts + 1) }
+                }
+            }
+        }
+    }
+
+    fun stopKeepAlive() {
+        watchdog?.cancel(); watchdog = null
+        stopScan()
+    }
+
+    /** Quita de la lista lo que lleva más de [DEVICE_TIMEOUT_MS] sin oírse, aunque no haya llegado ningún anuncio nuevo. */
+    private fun pruneStale(now: Long) {
+        val before = seen.size
+        seen.entries.removeAll { now - it.value.lastSeenElapsedMs > DEVICE_TIMEOUT_MS }
+        if (seen.size != before) {
+            val list = seen.values.sortedWith(compareByDescending<BleDeviceInfo> { it.isTarget }.thenByDescending { it.rssi })
+            _state.update { it.copy(devices = list) }
+        }
     }
 
     /** Re-lee si hay adaptador y si el Bluetooth está encendido. */

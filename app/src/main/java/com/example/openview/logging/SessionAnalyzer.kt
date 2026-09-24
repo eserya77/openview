@@ -58,7 +58,8 @@ object SessionAnalyzer {
         if (arrivals.isEmpty() || detections.isEmpty()) return SessionSummary(emptyList(), 0.0, 0, 0.0, null)
 
         val lastT = detections.last().tS
-        val destination = arrivals.last().nodeId
+        val destination = arrivals.lastOrNull { it.nodeId != CENTER_NODE_ID }?.nodeId
+            ?: return SessionSummary(emptyList(), 0.0, 0, 0.0, null)
 
         fun stateAt(t: Double): String? {
             var lo = 0; var hi = detections.size - 1; var ans = -1
@@ -75,6 +76,8 @@ object SessionAnalyzer {
                 ?: arrivals.getOrNull(i + 1)?.tS ?: lastT
             val evalStart = if (end - a.tS > SETTLE_S + 0.5) a.tS + SETTLE_S else a.tS
 
+            // En el centro (inicio) lo correcto es que la app NO detecte ningún nodo.
+            val expected: String? = if (a.nodeId == CENTER_NODE_ID) null else a.nodeId
             var okS = 0.0
             var totalS = 0.0
             val wrong = mutableMapOf<String, Double>()
@@ -82,16 +85,16 @@ object SessionAnalyzer {
             while (t < end) {
                 val s = stateAt(t)
                 totalS += STEP_S
-                if (s == a.nodeId) okS += STEP_S
+                if (s == expected) okS += STEP_S
                 else if (s != null) wrong[s] = (wrong[s] ?: 0.0) + STEP_S
-                if (i != arrivals.lastIndex && s == destination) wrongDestS += STEP_S
+                if (a.nodeId != destination && s == destination) wrongDestS += STEP_S
                 t += STEP_S
             }
 
             var latency: Double? = null
             t = a.tS
             while (t < end) {
-                if (stateAt(t) == a.nodeId) { latency = t - a.tS; break }
+                if (stateAt(t) == expected) { latency = t - a.tS; break }
                 t += STEP_S
             }
 

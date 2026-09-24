@@ -172,6 +172,19 @@ object BleSessionLogger {
         _state.update { it.copy(rowCount = rows.size) }
     }
 
+    /** Registra la configuración de la prueba (escenario, rotación, factores) como una fila LAYOUT. */
+    fun addLayout(description: String) {
+        if (description.isBlank()) return
+        log(
+            BleLogRow(
+                timestampS = elapsedSeconds(), beaconName = "_LAYOUT_",
+                rssiRaw = null, rssiSmoothed = null, estimatedDistanceM = null,
+                computedXM = null, computedYM = null, detectedNodeId = null,
+                signalState = "-", note = description.trim(), event = MarkEvent.LAYOUT
+            )
+        )
+    }
+
     /** Inserta una fila de nota de texto libre con la marca de tiempo actual. */
     fun addNote(note: String) {
         if (note.isBlank()) return

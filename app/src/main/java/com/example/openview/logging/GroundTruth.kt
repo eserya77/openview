@@ -7,7 +7,11 @@ object MarkEvent {
     const val ARRIVE = "ARRIVE"   // "llegué a este nodo"
     const val DEPART = "DEPART"   // "salgo de este nodo" (fin de la estancia)
     const val NONE = "NONE"       // instante sin balizas visibles
+    const val LAYOUT = "LAYOUT"   // configuración de la prueba: posiciones, rotación, factores
 }
+
+/** Nodo especial de la prueba guiada: el punto de inicio (centro), donde NO debería detectarse ningún nodo. */
+const val CENTER_NODE_ID = "CENTRO"
 
 /** Una marca de "estoy aquí" en el tiempo de la sesión (ya corregida por el retraso con que se tocó). */
 data class TruthMark(
