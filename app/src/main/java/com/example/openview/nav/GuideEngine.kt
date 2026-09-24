@@ -48,6 +48,11 @@ data class GuideParams(
     val arriveTouchMs: Long = 500L,
     val arriveStillMs: Long = 1_000L,
     val arriveUnknownMotionMs: Long = 1_500L,
+    /**
+     * «Llegaste» exige además estar realmente al lado: nivel ≥ ref. a 1 m + esto (≈ 50 cm). En las pruebas reales las
+     * llegadas daban +10…+20 dB y el falso destino al pasar sin parar (2 m antes), +5 dB.
+     */
+    val arriveMinRelDb: Double = 6.0,
     /** "Te alejas": pendiente del objetivo por debajo de esto (dB/s) sostenida, caminando. */
     val colderSlope: Double = -1.5,
     val colderHoldMs: Long = 2_000L,
@@ -225,7 +230,9 @@ class GuideEngine(
         val isSkip = c > target
         val reqDom = when { isBack -> params.backDominanceDb; isSkip -> params.skipDominanceDb; else -> params.dominanceDb }
         val reqHold = when { isBack -> params.backHoldMs; isSkip -> params.skipHoldMs; else -> params.spotHoldMs }
-        if (c >= 0 && dom >= reqDom) {
+        // Saltarse puntos solo si el nuevo está de verdad CERCA (evita anunciar el destino 2 m antes por una baliza fuerte).
+        val eligible = c >= 0 && dom >= reqDom && (!isSkip || best!!.zone >= Zone.CERCA)
+        if (eligible) {
             if (candidate != c) { candidate = c; candidateSince = tMs }
             if (at != c && tMs - candidateSince >= reqHold) {
                 at = c; atSince = tMs; touchSince = -1L
@@ -240,8 +247,10 @@ class GuideEngine(
         // Llegada al destino: junto a él y (tocando, o quieto, o un rato si no se sabe si te mueves).
         if (!arrived && at == route.lastIndex && progress == route.lastIndex) {
             val t = tracks.firstOrNull { spotOfBeacon[it.beacon] == at }
+            val beside = t != null && (t.zone == Zone.TOCANDO || t.relDb >= params.arriveMinRelDb)
             if (t?.zone == Zone.TOCANDO) { if (touchSince < 0) touchSince = tMs } else touchSince = -1L
-            if (isMoving == false) { if (stillSince < 0) stillSince = tMs } else stillSince = -1L
+            if (isMoving == false && beside) { if (stillSince < 0) stillSince = tMs } else stillSince = -1L
+            if (!beside) atSince = tMs
             val ok = (touchSince >= 0 && tMs - touchSince >= params.arriveTouchMs) ||
                 (stillSince >= 0 && tMs - stillSince >= params.arriveStillMs) ||
                 (isMoving == null && tMs - atSince >= params.arriveUnknownMotionMs)
@@ -275,7 +284,7 @@ class GuideEngine(
                 if (i == route.lastIndex) {
                     target = i
                     emit(GuideEventKind.AT_SPOT, (if (skipped.isNotEmpty()) "Pasaste ${skipped.joinToString { it.label }}. " else "") +
-                        "Estás junto a ${s.label}, tu destino. Detente.", s.id)
+                        "Te acercas a ${s.label}, tu destino. Sigue despacio.", s.id)
                 } else {
                     target = i + 1
                     val next = route[target]

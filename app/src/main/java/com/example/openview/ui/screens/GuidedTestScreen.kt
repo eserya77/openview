@@ -201,13 +201,26 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
     var trainedNow by remember { mutableStateOf(false) }
     var runStay by remember { mutableStateOf(StayType.CONTACT) }
     var passSummary by remember { mutableStateOf<com.example.openview.logging.PassSummary?>(null) }
+    var passGuide by remember { mutableStateOf<com.example.openview.logging.PassSummary?>(null) }
 
     fun finishTest() {
         BleSessionLogger.stop()
         val rot = runRotation; val st = runSetup
         val beaconOfNode = if (rot != null && st != null) st.spots.mapIndexed { i, s -> s.id to rot.beaconAt[i] }.toMap() else emptyMap()
         val rows = BleSessionLogger.currentRows()
-        if (runStay == StayType.PASS) { passSummary = com.example.openview.logging.PassAnalyzer.analyze(rows, beaconOfNode); summary = null }
+        if (runStay == StayType.PASS) {
+            passSummary = com.example.openview.logging.PassAnalyzer.analyze(rows, beaconOfNode); summary = null
+            // Lo que habría dicho la GUÍA del producto con esta misma vuelta (hitos anunciados).
+            val route = runSteps.filter { !it.isCenter }.map { com.example.openview.nav.GuideSpot(it.node.id, it.node.label, it.node.beaconName ?: "", it.node.x, it.node.y) }
+            val events = com.example.openview.nav.GuideReplay.run(
+                rows, route,
+                refAt1m = { b -> if (RouteRepository.isCalibrated(b)) RouteRepository.calibrationFor(b).toDouble() else null },
+                contactOf = { null }, motion = { true }
+            )
+            val dets = events.filter { it.kind == com.example.openview.nav.GuideEventKind.PASSED || it.kind == com.example.openview.nav.GuideEventKind.AT_SPOT }
+                .map { com.example.openview.logging.Detection(it.tMs / 1000.0, it.spotId) }
+            passGuide = com.example.openview.logging.PassAnalyzer.analyze(rows, beaconOfNode, dets)
+        }
         else { summary = SessionAnalyzer.analyze(rows, beaconOfNode); passSummary = null }
         if (rot != null && st != null) TestSetupRepository.lapDone(st.id, rot.id)
         phase = GuidedPhase.DONE
@@ -488,6 +501,7 @@ fun GuidedTestScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onB
 
             GuidedPhase.DONE -> if (runStay == StayType.PASS) PassDone(
                 summary = passSummary,
+                guide = passGuide,
                 nodeLabels = runSteps.associate { it.node.id to it.node.label },
                 onExport = { BleSessionLogger.exportAndShare(context) },
                 onAgain = { phase = GuidedPhase.SETUP; passSummary = null },
@@ -632,7 +646,16 @@ private fun RunMap(nodes: List<NavNode>, index: Int, dwelling: Boolean) {
 
 /** Resultado del modo «pasando sin parar». */
 @Composable
-private fun PassDone(summary: com.example.openview.logging.PassSummary?, nodeLabels: Map<String, String>, onExport: () -> Unit, onAgain: () -> Unit, onBack: () -> Unit) {
+private fun PassDone(summary: com.example.openview.logging.PassSummary?, guide: com.example.openview.logging.PassSummary?, nodeLabels: Map<String, String>, onExport: () -> Unit, onAgain: () -> Unit, onBack: () -> Unit) {
+    guide?.takeIf { it.points.isNotEmpty() }?.let { g ->
+        AdminCard(container = (if (g.detected == g.points.size && g.orderOk) AdminColors.goodFill else AdminColors.warn).copy(alpha = .12f), border = null) {
+            Text("Guía de usuario: anunció ${g.detected} de ${g.points.size}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(if (g.orderOk) "✓ En orden." else "Orden: " + g.appSequence.joinToString(" → ") { nodeLabels[it] ?: it }, style = MaterialTheme.typography.bodyLarge)
+            g.points.forEach { p -> StatRow(nodeLabels[p.nodeId] ?: p.nodeId, p.detectLatencyS?.let { "anunciado %+.1f s".format(it) } ?: "no anunciado") }
+            Text("Es lo que habría dicho la guía del producto (botón Iniciar) con esta misma vuelta.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text("Posicionador de laboratorio (v3):", style = MaterialTheme.typography.titleSmall, modifier = Modifier.fillMaxWidth())
+    }
     if (summary == null || summary.points.isEmpty()) {
         Text("No marcaste ningún paso: no hay nada que evaluar.", style = MaterialTheme.typography.bodyLarge)
     } else {

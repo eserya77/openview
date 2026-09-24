@@ -50,6 +50,15 @@ class TtsController(context: Context) {
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, "openview-utt")
     }
 
+    /** Como [speak] pero SIN interrumpir: se pone a la cola (para leer una lista entera, p. ej. la ayuda). */
+    fun speakQueued(text: String) {
+        if (text.isBlank()) return
+        if (!ready) { pending = (pending?.let { "$it. " } ?: "") + text; return }
+        tts.setSpeechRate(rate)
+        val params = Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, volume.coerceIn(0f, 1f)) }
+        tts.speak(text, TextToSpeech.QUEUE_ADD, params, "openview-utt-q")
+    }
+
     fun stop() {
         if (ready) tts.stop()
     }

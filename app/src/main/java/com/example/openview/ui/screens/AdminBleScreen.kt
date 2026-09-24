@@ -200,6 +200,12 @@ private fun AdminHome(active: SavedRoute?, usable: Int, total: Int, profiled: In
             AdminStatTile("Balizas", "$usable de $total", if (usable >= 3) AdminColors.good else AdminColors.bad, Modifier.weight(1f))
             AdminStatTile("Calibradas", "$profiled de $total", if (profiled >= usable && usable > 0) AdminColors.good else AdminColors.warn, Modifier.weight(1f))
         }
+        val place = com.example.openview.data.GuidePlaces.current()
+        Text(
+            "«Iniciar» (persona usuaria) guía por: " + (place?.let { p -> "${p.name} · " + p.spots.joinToString(" · ") { "${it.label} (${it.beacon.takeLast(2)})" } } ?: "nada configurado") +
+                ". Se cambia eligiendo escenario y balizas en la Guía de usuario o la Prueba guiada.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth()
+        )
         Text("Orden recomendado", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth())
         AdminEntry(1, "Calibrar balizas", "Un asistente con mapa te guía por distancias y ángulos.", Icons.Filled.Tune, MaterialTheme.colorScheme.primary, onCalibrate)
         AdminEntry(2, "Prueba guiada", "Recorre las posiciones, rota las placas y mide el acierto.", Icons.Filled.FiberManualRecord, AdminColors.bad, onGuided)

@@ -49,3 +49,21 @@ volver atrás a propósito (debe decir «vas hacia atrás»); destino P2 (debe d
 - `ble/BleScanner.kt`: escaneo **con filtro** (nombre NAV_BLE_01..06 o datos de fabricante 0xFFFF). Si en 10 s no aparece
   ninguna baliza, vuelve solo al escaneo sin filtro (lo indica el panel).
 - La guía mantiene la pantalla encendida. Escanear con la pantalla apagada necesitará un servicio en primer plano (pendiente).
+
+
+## 3. Botón «Iniciar» (producto, persona usuaria)
+- Inicio → **Iniciar** → «¿A dónde quieres ir?» (los puntos del escenario elegido en el panel, con sus balizas) → la app
+  escucha 3 s para saber junto a qué punto estás, arma la ruta en el sentido que toque y guía igual que la Guía de usuario
+  (misma `GuideSession`): voz, pitidos (si están activados), vibración, llegada automática. **Vol+ repite.**
+- Al llegar: «Ir a otro destino» o «Volver al inicio». Si ya estás en el destino, lo dice.
+- **Configurar voz**: velocidad, volumen, pitidos y vibración (se guardan en el teléfono). **Ayuda**: 9 consejos.
+- Sin TalkBack, la app hace de lector: anuncia cada pantalla, dice cada botón al pulsarlo y los valores al cambiarlos.
+  Con TalkBack activado no habla por encima: todos los botones tienen su descripción para TalkBack.
+- Las herramientas técnicas (panel, simulador, forma de prueba) están plegadas en «Opciones de instalación y pruebas».
+
+## Pruebas del 24-sep 13:45 (resumen)
+- Guía ida con vuelta atrás a propósito: dijo «vas hacia atrás» junto a la 01 y no dio llegada ✔.
+- Pasar sin parar: en la ida la 02 no se distingue porque la 03 (2,6 m más allá) se oye más fuerte al pasar la 02
+  (−75 frente a −80…−85 dBm). Revisa la ORIENTACIÓN de la 02 (antena hacia el paso) y calibra 01/02/03.
+- Parada a 1 m: la 02 salía como 03 el 100 % por la calibración caducada de la 03 (+8 dB a su favor); con la corrección, ≥ 90 %.
+- Motor: «Llegaste» exige ahora estar a ≈ 50 cm (≥ ref + 6 dB); antes de eso dice «te acercas a tu destino».

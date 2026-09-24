@@ -25,6 +25,7 @@ class MainActivity : ComponentActivity() {
         RouteRepository.initialize(applicationContext)
         TestSetupRepository.initialize(applicationContext)
         FingerprintRepository.initialize(applicationContext)
+        com.example.openview.data.VoicePrefs.initialize(applicationContext)
         setContent {
             OpenviewTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->

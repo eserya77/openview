@@ -39,5 +39,9 @@ enum class BleSignal(val label: String) {
 /** Configuración de voz simulada (no reproduce audio real). */
 data class VoiceSettings(
     val speed: Float = 0.5f,  // 0f..1f
-    val volume: Float = 0.7f  // 0f..1f
+    val volume: Float = 0.7f, // 0f..1f
+    /** Pitidos «frío/caliente» durante la guía. */
+    val beeps: Boolean = true,
+    /** Vibraciones (punto, llegada, corrección). */
+    val vibration: Boolean = true
 )

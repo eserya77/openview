@@ -75,7 +75,10 @@ import com.example.openview.logging.BleSessionLogger
 import com.example.openview.logging.MarkEvent
 import com.example.openview.logging.PassAnalyzer
 import com.example.openview.logging.PassSummary
-import com.example.openview.nav.GuideEngine
+import com.example.openview.nav.GuideState
+import com.example.openview.guide.GuideFeedbackOptions
+import com.example.openview.guide.GuideSession
+import kotlinx.coroutines.flow.MutableStateFlow
 import com.example.openview.nav.GuideEvent
 import com.example.openview.nav.GuideEventKind
 import com.example.openview.nav.GuideSpot
@@ -117,7 +120,7 @@ fun UserGuideScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onBa
     val scan by scanner.state.collectAsState()
     val catalog by RouteRepository.catalog.collectAsState()
     val setups by TestSetupRepository.state.collectAsState()
-    val session by BleSessionLogger.state.collectAsState()
+    val recording by BleSessionLogger.state.collectAsState()
     val tts = rememberTtsController()
     val motion = remember { MotionDetector(context.applicationContext) }
     val haptics = remember { Haptics(context.applicationContext) }
@@ -157,18 +160,14 @@ fun UserGuideScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onBa
     val routeIdx = ordered.take(destPos + 1)
     val route = routeIdx.map { i -> setup.spots[i].let { GuideSpot(it.id, it.label, beaconAt[i], it.x, it.y) } }
 
-    // ---------- Ejecución ----------
+    // ---------- Ejecución (misma sesión que el botón «Iniciar» del producto) ----------
     var phase by remember { mutableStateOf(GuidePhase.SETUP) }
-    var runId by remember { mutableIntStateOf(0) }
-    var engine by remember { mutableStateOf<GuideEngine?>(null) }
+    var session by remember { mutableStateOf<GuideSession?>(null) }
     var runRoute by remember { mutableStateOf(listOf<GuideSpot>()) }
-    var uiTick by remember { mutableLongStateOf(0L) }
-    val log = remember { mutableStateListOf<GuideEvent>() }
     var truthIdx by remember { mutableIntStateOf(0) }
     var passSummary by remember { mutableStateOf<PassSummary?>(null) }
     var startMs by remember { mutableLongStateOf(0L) }
-
-    fun speak(text: String) { if (voiceOn) tts.speak(text) }
+    var lastStateLog by remember { mutableLongStateOf(0L) }
 
     fun start() {
         val rot = Rotation("GUIA", "Guía", beaconAt.toList())
@@ -176,82 +175,49 @@ fun UserGuideScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onBa
         val g = TestLayout.graph(setup, rot)
         ActiveGraph.useTemporary(g, route.map { it.id }); ActiveFingerprints.key = null
         ActiveGraph.resetToken += 1
-        val liveTx = scan.targets.associate { (it.name ?: "") to it.txLevel }
-        engine = GuideEngine(
-            route,
-            refAt1m = { b -> if (RouteRepository.isCalibrated(b)) RouteRepository.calibrationFor(b).toDouble() else null },
-            contactOf = { b -> RouteRepository.profileFor(b)?.takeUnless { it.isStaleFor(liveTx[b]) }?.contactRssi }
-        )
-        runRoute = route; log.clear(); truthIdx = 0; passSummary = null
+        runRoute = route; truthIdx = 0; passSummary = null
         startMs = SystemClock.elapsedRealtime()
         BleSessionLogger.start("guia_${setup.id}_${if (reverse) "vuelta" else "ida"}", "Guía de usuario (modo prueba), ${route.size} puntos")
         BleSessionLogger.addLayout(
             "setup=${setup.id};guide=1;dir=${if (reverse) "vuelta" else "ida"};dest=${route.last().id};" +
                 route.joinToString(";") { "${it.id}=${it.beacon}" } + ";filtered=${scan.filtered};motion=${motion.available}"
         )
-        runId += 1
+        session = GuideSession(
+            route, tts, sonar, haptics, motion, GuideFeedbackOptions(voiceOn, sonarOn, vibrateOn),
+            onEvent = { ev -> BleSessionLogger.addNote("GUIA ${ev.kind}: ${ev.text}") },
+            onTick = { st, now ->
+                if (logState && now - lastStateLog >= 1_000L) {
+                    lastStateLog = now
+                    BleSessionLogger.addNote(
+                        "GUIA_ESTADO tgt=${route.getOrNull(st.target)?.id};prog=${st.progress};at=${st.atSpot};temp=%.2f;mov=${st.moving};rate=%.1f;".format(Locale.US, st.targetTemperature, scanner.state.value.targetRatePerS) +
+                            st.tracks.joinToString(";") { "${it.beacon.takeLast(2)}:%.1f/%+.1f/${it.zone.name}".format(Locale.US, it.level, it.slope) }
+                    )
+                }
+            }
+        )
         phase = GuidePhase.RUN
     }
 
     fun finish() {
+        session = null
         BleSessionLogger.stop()
         val rows = BleSessionLogger.currentRows()
         passSummary = if (truthIdx > 0) PassAnalyzer.analyze(rows, runRoute.associate { it.id to it.beacon }) else null
         phase = GuidePhase.DONE
     }
 
-    // Muestras → motor
-    LaunchedEffect(runId, phase) {
-        val e = engine ?: return@LaunchedEffect
-        if (phase != GuidePhase.RUN) return@LaunchedEffect
-        scanner.samples.collect { s -> e.onSample(s.name, s.rssi, s.tMs) }
-    }
-    // Reloj del motor: eventos → voz, vibración, registro
-    LaunchedEffect(runId, phase) {
-        val e = engine ?: return@LaunchedEffect
-        if (phase != GuidePhase.RUN) return@LaunchedEffect
-        var lastStateLog = 0L
-        while (isActive) {
-            val now = SystemClock.elapsedRealtime()
-            val fresh = e.tick(now, motion.moving)
-            fresh.forEach { ev ->
-                log.add(ev); if (log.size > 80) log.removeAt(0)
-                BleSessionLogger.addNote("GUIA ${ev.kind}: ${ev.text}")
-                when (ev.kind) {
-                    GuideEventKind.ARRIVED -> { speak(ev.text); if (vibrateOn) haptics.arrived() }
-                    GuideEventKind.PASSED, GuideEventKind.AT_SPOT -> { speak(ev.text); if (vibrateOn) haptics.milestone() }
-                    GuideEventKind.WRONG_WAY -> { speak(ev.text); if (vibrateOn) haptics.correct(); if (sonarOn) sonar.warn() }
-                    GuideEventKind.COLDER -> { if (sonarOn) sonar.warn(); if (vibrateOn) haptics.correct(); speak(ev.text) }
-                    GuideEventKind.START, GuideEventKind.LOST, GuideEventKind.FOUND -> speak(ev.text)
-                }
-            }
-            if (logState && now - lastStateLog >= 1_000L) {
-                lastStateLog = now
-                val st = e.state
-                BleSessionLogger.addNote(
-                    "GUIA_ESTADO tgt=${runRoute.getOrNull(st.target)?.id};prog=${st.progress};at=${st.atSpot};temp=%.2f;mov=${st.moving};".format(Locale.US, st.targetTemperature) +
-                        st.tracks.joinToString(";") { "${it.beacon.takeLast(2)}:%.1f/%+.1f/${it.zone.name}".format(Locale.US, it.level, it.slope) }
-                )
-            }
-            uiTick = now
-            delay(200)
-        }
-    }
-    // Pitidos «frío/caliente» hacia el punto objetivo
-    LaunchedEffect(runId, phase, sonarOn) {
-        val e = engine ?: return@LaunchedEffect
-        if (phase != GuidePhase.RUN || !sonarOn) return@LaunchedEffect
-        while (isActive) {
-            val st = e.state
-            val heard = st.tracks.any { it.beacon == runRoute.getOrNull(st.target)?.beacon }
-            if (st.arrived || !heard) { delay(400); continue }
-            sonar.beep(st.targetTemperature)
-            delay(SonarPlayer.intervalMs(st.targetTemperature))
-        }
-    }
+    LaunchedEffect(session) { session?.run(scanner) }
+    LaunchedEffect(voiceOn, sonarOn, vibrateOn) { session?.options = GuideFeedbackOptions(voiceOn, sonarOn, vibrateOn) }
+    val emptyState = remember { MutableStateFlow(GuideState()) }
+    val emptyEvents = remember { MutableStateFlow<List<GuideEvent>>(emptyList()) }
+    val guideState by (session?.state ?: emptyState).collectAsState()
+    val events by (session?.events ?: emptyEvents).collectAsState()
+    var keptEvents by remember { mutableStateOf<List<GuideEvent>>(emptyList()) }
+    LaunchedEffect(events) { if (events.isNotEmpty()) keptEvents = events }
+    val log = if (phase == GuidePhase.DONE) keptEvents else events
 
     // Vol+ = repetir la última instrucción (como en el producto final).
-    val onVol by rememberUpdatedState({ engine?.state?.instruction?.let { if (it.isNotBlank()) tts.speak(it) } ?: Unit })
+    val onVol by rememberUpdatedState({ session?.repeatInstruction() ?: Unit })
     DisposableEffect(Unit) {
         val l = { onVol() }
         VolumeUpDispatcher.register(l)
@@ -356,9 +322,8 @@ fun UserGuideScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onBa
             }
 
             GuidePhase.RUN -> {
-                val e = engine
-                val nowTick = uiTick   // leerlo aquí hace que esta parte se redibuje con cada tic del motor
-                val st = e?.state
+                val st: GuideState? = guideState
+                val nowTick = SystemClock.elapsedRealtime()
                 val tgt = st?.let { runRoute.getOrNull(it.target) }
                 // ---- Lo que ve/oye la persona usuaria ----
                 AdminCard(container = if (st?.arrived == true) AdminColors.goodFill.copy(alpha = .16f) else MaterialTheme.colorScheme.primaryContainer, border = null, padding = 20.dp) {
@@ -375,7 +340,7 @@ fun UserGuideScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onBa
                     RouteProgress(runRoute, st?.progress ?: -1, st?.target ?: 0, st?.atSpot)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = { st?.instruction?.let { tts.speak(it) } }, modifier = Modifier.weight(1f).height(64.dp)) {
+                    Button(onClick = { session?.repeatInstruction() }, modifier = Modifier.weight(1f).height(64.dp)) {
                         androidx.compose.material3.Icon(Icons.Filled.Replay, null); Spacer(Modifier.width(8.dp)); Text("Repetir", fontSize = 18.sp)
                     }
                     OutlinedButton(onClick = { finish() }, modifier = Modifier.weight(1f).height(64.dp)) {
@@ -385,7 +350,7 @@ fun UserGuideScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onBa
                 Text("Vol+ también repite la instrucción.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
                 // ---- Panel detallado ----
-                if (verbose && e != null && st != null) {
+                if (verbose && st != null) {
                     AdminCard {
                         SectionHeader("Detalle técnico", subtitle = "Lo que la persona usuaria no ve.")
                         StatRow("Tiempo", "%.1f s".format((nowTick - startMs) / 1000.0))
@@ -395,7 +360,7 @@ fun UserGuideScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onBa
                         StatRow("Movimiento", when (st.moving) { true -> "caminando"; false -> "quieto"; null -> "desconocido" } + " · σ %.2f".format(motion.stdDev))
                         StatRow("Progreso / objetivo", "${runRoute.getOrNull(st.progress)?.id ?: "—"} → ${tgt?.id ?: "—"}")
                         StatRow("Junto a", st.atSpot ?: "ninguno")
-                        StatRow("Grabando", "${session.rowCount} filas")
+                        StatRow("Grabando", "${recording.rowCount} filas")
                     }
                     AdminCard {
                         SectionHeader("Balizas", subtitle = "nivel (Kalman) · pendiente · nivel − ref. 1 m · zona")

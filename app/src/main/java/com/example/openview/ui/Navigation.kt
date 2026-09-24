@@ -31,6 +31,8 @@ import com.example.openview.ui.screens.ArrivalScreen
 import com.example.openview.ui.screens.DestinationSelectionScreen
 import com.example.openview.ui.screens.FailureScreen
 import com.example.openview.ui.screens.GraphShapeScreen
+import com.example.openview.ui.screens.GuideDestinationScreen
+import com.example.openview.ui.screens.GuideRunScreen
 import com.example.openview.ui.screens.HelpScreen
 import com.example.openview.ui.screens.OnboardingScreen
 import com.example.openview.ui.screens.RoutePreviewScreen
@@ -55,6 +57,10 @@ object Routes {
     const val SIMULATOR_DESTINATION = "simulator_destination"
     const val SIMULATOR_PREVIEW = "simulator_preview"
     const val SIMULATOR_ACTIVE_NAV = "simulator_active_nav"
+    /** Guía del producto (botón «Iniciar»). */
+    const val GUIDE_DEST = "guide_dest"
+    const val GUIDE_RUN = "guide_run/{dest}"
+    fun guideRun(dest: Int) = "guide_run/$dest"
 }
 
 @Composable
@@ -160,7 +166,7 @@ fun OpenViewApp(
         composable(Routes.ONBOARDING) {
             OnboardingScreen(
                 tts = tts,
-                onStart = { navController.navigate(Routes.DESTINATION) },
+                onStart = { navController.navigate(Routes.GUIDE_DEST) },
                 onConfigureVoice = { navController.navigate(Routes.VOICE_CONFIG) },
                 onHelp = { navController.navigate(Routes.HELP) },
                 onAdmin = { navController.navigate(Routes.ADMIN_BLE) },
@@ -186,6 +192,8 @@ fun OpenViewApp(
                 tts = tts,
                 onSpeedChange = viewModel::updateVoiceSpeed,
                 onVolumeChange = viewModel::updateVoiceVolume,
+                onBeepsChange = viewModel::updateBeeps,
+                onVibrationChange = viewModel::updateVibration,
                 onTestVoice = viewModel::testVoice,
                 onDismissTestMessage = viewModel::clearVoiceTestMessage,
                 onSave = { navController.popBackStack() },
@@ -340,7 +348,28 @@ fun OpenViewApp(
         }
 
         composable(Routes.HELP) {
-            HelpScreen(onBack = { navController.popBackStack() })
+            HelpScreen(tts = tts, onBack = { navController.popBackStack() })
+        }
+
+        composable(Routes.GUIDE_DEST) {
+            GuideDestinationScreen(
+                tts = tts,
+                onSelect = { i -> navController.navigate(Routes.guideRun(i)) },
+                onHelp = { navController.navigate(Routes.HELP) },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.GUIDE_RUN) { entry ->
+            val dest = entry.arguments?.getString("dest")?.toIntOrNull() ?: 0
+            GuideRunScreen(
+                scanner = bleScanner,
+                tts = tts,
+                voice = state.voiceSettings,
+                destIdx = dest,
+                onNewDestination = { navController.popBackStack(Routes.GUIDE_DEST, inclusive = false) },
+                onHome = { navController.popBackStack(Routes.ONBOARDING, inclusive = false) }
+            )
         }
 
         composable(Routes.ADMIN_BLE) {

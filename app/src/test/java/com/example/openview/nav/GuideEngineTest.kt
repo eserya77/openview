@@ -24,16 +24,17 @@ class GuideEngineTest {
     private fun engine(route: List<GuideSpot>) = GuideEngine(route, { -80.0 }, { -55.0 })
 
     /** Camina por los puntos [waypoints] (x en metros, a [lateral] m de la pared) y se queda quieto al final [stillS] s. */
-    private fun walk(e: GuideEngine, waypoints: List<Double>, lateral: Double = 0.5, speed: Double = 0.7, stillS: Double = 3.0, seed: Int = 1): List<Pair<Double, GuideEvent>> {
+    private fun walk(e: GuideEngine, waypoints: List<Double>, lateral: Double = 0.5, speed: Double = 0.7, stillS: Double = 3.0, seed: Int = 1, endLateral: Double = 0.3): List<Pair<Double, GuideEvent>> {
         val rnd = Random(seed)
         val out = mutableListOf<Pair<Double, GuideEvent>>()
         var t = 0L
         var x = waypoints.first()
+        var lat = lateral
         fun step(moving: Boolean) {
             // ~10 muestras/s por baliza, en instantes desfasados
             spots.forEachIndexed { i, s ->
                 if (rnd.nextDouble() < 0.5) {
-                    val d = hypot(x - s.x, lateral).coerceAtLeast(0.05)
+                    val d = hypot(x - s.x, lat).coerceAtLeast(0.05)
                     val rssi = (-80.0 - 20 * log10(d) + rnd.nextGaussian4()).toInt()
                     if (rssi > -100) e.onSample(s.beacon, rssi, t + i * 7L)
                 }
@@ -46,6 +47,7 @@ class GuideEngineTest {
             val n = (kotlin.math.abs(b - a) / speed / 0.05).toInt().coerceAtLeast(1)
             for (i in 0..n) { x = a + (b - a) * i / n; step(true) }
         }
+        lat = endLateral   // al detenerse se acerca a la baliza (toca la franja)
         repeat((stillS / 0.05).toInt()) { step(false) }
         return out
     }

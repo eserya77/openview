@@ -50,15 +50,23 @@ data class NavigationUiState(
  */
 class NavigationViewModel : ViewModel() {
 
-    private val _uiState = MutableStateFlow(NavigationUiState())
+    private val _uiState = MutableStateFlow(NavigationUiState(voiceSettings = com.example.openview.data.VoicePrefs.load()))
     val uiState: StateFlow<NavigationUiState> = _uiState.asStateFlow()
 
     // --- Configuración de voz ---
-    fun updateVoiceSpeed(value: Float) =
-        _uiState.update { it.copy(voiceSettings = it.voiceSettings.copy(speed = value)) }
+    fun updateVoiceSpeed(value: Float) = updateVoice { it.copy(speed = value) }
 
-    fun updateVoiceVolume(value: Float) =
-        _uiState.update { it.copy(voiceSettings = it.voiceSettings.copy(volume = value)) }
+    fun updateVoiceVolume(value: Float) = updateVoice { it.copy(volume = value) }
+
+    fun updateBeeps(on: Boolean) = updateVoice { it.copy(beeps = on) }
+
+    fun updateVibration(on: Boolean) = updateVoice { it.copy(vibration = on) }
+
+    private fun updateVoice(change: (VoiceSettings) -> VoiceSettings) = _uiState.update {
+        val v = change(it.voiceSettings)
+        com.example.openview.data.VoicePrefs.save(v)
+        it.copy(voiceSettings = v)
+    }
 
     fun testVoice() = _uiState.update {
         it.copy(lastVoiceTestMessage = "Reproduciendo: «Avanza 8 metros y gira a la derecha».")
