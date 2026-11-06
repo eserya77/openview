@@ -32,6 +32,10 @@ class GuideSession(
     private val haptics: Haptics,
     private val motion: MotionDetector,
     options: GuideFeedbackOptions,
+    /** Las demás balizas del lugar (para avisar de desvíos). */
+    others: List<GuideSpot> = emptyList(),
+    /** Indicación de cada tramo («Gira a la izquierda y camina 2 metros hasta Baño»). */
+    legs: List<String> = emptyList(),
     /** Se llama con cada evento (p. ej. para registrarlo en el CSV). */
     private val onEvent: (GuideEvent) -> Unit = {},
     /** Se llama en cada tic (≈ 5 veces por segundo) con el estado. */
@@ -44,7 +48,8 @@ class GuideSession(
         GuideEngine(
             route,
             refAt1m = { b -> if (RouteRepository.isCalibrated(b)) RouteRepository.calibrationFor(b).toDouble() else null },
-            contactOf = { b -> RouteRepository.profileFor(b)?.takeUnless { it.isStaleFor(liveTx(b)) }?.contactRssi }
+            contactOf = { b -> RouteRepository.profileFor(b)?.takeUnless { it.isStaleFor(liveTx(b)) }?.contactRssi },
+            others = others, legs = legs
         )
     }
 
@@ -55,7 +60,17 @@ class GuideSession(
 
     val startedAtMs: Long = SystemClock.elapsedRealtime()
 
-    private fun speak(text: String) { if (options.voice) tts?.speak(text) }
+    private var lastSpoken = ""
+    private var lastSpokenMs = 0L
+
+    /** Habla, salvo que sea lo mismo que se acaba de decir (p. ej. la primera indicación, al arrancar y en el punto de salida). */
+    private fun speak(text: String) {
+        if (!options.voice) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastSpokenMs < 6_000L && lastSpoken.endsWith(text)) return
+        lastSpoken = text; lastSpokenMs = now
+        tts?.speak(text)
+    }
 
     /** Repite la última instrucción (botón «Repetir» o Vol+). */
     fun repeatInstruction() {
@@ -77,9 +92,10 @@ class GuideSession(
                     when (ev.kind) {
                         GuideEventKind.ARRIVED -> { speak(ev.text); if (o.vibration) haptics.arrived() }
                         GuideEventKind.PASSED, GuideEventKind.AT_SPOT -> { speak(ev.text); if (o.vibration) haptics.milestone() }
-                        GuideEventKind.WRONG_WAY, GuideEventKind.COLDER -> {
+                        GuideEventKind.WRONG_WAY, GuideEventKind.COLDER, GuideEventKind.OFF_ROUTE, GuideEventKind.LEAVING -> {
                             if (o.beeps) sonar.warn(); if (o.vibration) haptics.correct(); speak(ev.text)
                         }
+                        GuideEventKind.RETURNED -> { speak(ev.text); if (o.vibration) haptics.milestone() }
                         GuideEventKind.START, GuideEventKind.LOST, GuideEventKind.FOUND -> speak(ev.text)
                     }
                 }
@@ -89,11 +105,12 @@ class GuideSession(
             }
         }
         launch {
-            // Pitidos: más rápidos y agudos al acercarte al siguiente punto. Se callan al llegar o sin señal del objetivo.
+            // Pitidos: más rápidos y agudos al acercarte al siguiente punto. Se callan al llegar (vuelven si te alejas del
+            // destino, para guiarte de vuelta) o sin señal del objetivo.
             while (isActive) {
                 val st = engine.state
                 val heard = st.tracks.any { it.beacon == route.getOrNull(st.target)?.beacon }
-                if (!options.beeps || st.arrived || !heard) { delay(400); continue }
+                if (!options.beeps || (st.arrived && !st.away) || !heard) { delay(400); continue }
                 sonar.beep(st.targetTemperature)
                 delay(SonarPlayer.intervalMs(st.targetTemperature))
             }

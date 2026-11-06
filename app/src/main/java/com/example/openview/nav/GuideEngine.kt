@@ -1,6 +1,7 @@
 package com.example.openview.nav
 
 import kotlin.math.hypot
+import kotlin.math.log10
 import kotlin.math.roundToInt
 
 /**
@@ -60,6 +61,23 @@ data class GuideParams(
     val wrongWayRepeatMs: Long = 6_000L,
     /** Sin ninguna baliza de la ruta durante este tiempo: "sin señal". */
     val lostMs: Long = 4_000L,
+    /** Desvío hacia una baliza del lugar que NO está en la ruta: tiene que dominar a las de la ruta este tiempo. */
+    val offRouteHoldMs: Long = 1_000L,
+    val offRouteRepeatMs: Long = 8_000L,
+    /**
+     * Fuera de ruta «por distancia»: ya dejaste el punto anterior y el siguiente suena más flojo de lo que sonaría a la
+     * longitud del tramo (modelo n = 2) menos esto, durante este tiempo. En tramos cortos (2 m) la señal baja demasiado
+     * despacio para el aviso por pendiente; esto detecta p. ej. no girar en una L.
+     */
+    val offRouteFarMarginDb: Double = 3.0,
+    val offRouteFarHoldMs: Long = 2_000L,
+    /** «Vuelves a la ruta»: el objetivo vuelve a subir (dB/s) durante este tiempo. */
+    val backOnRouteSlope: Double = 0.5,
+    val backOnRouteHoldMs: Long = 1_500L,
+    /** Después de llegar: «te alejas del destino» si su nivel relativo baja de esto (≈ 1,8 m) durante este tiempo. */
+    val leaveRelDb: Double = -5.0,
+    val leaveHoldMs: Long = 1_500L,
+    val leaveRepeatMs: Long = 8_000L,
     // Kalman (nivel + pendiente): ruido de proceso y de medida.
     val qLevel: Double = 2.0,
     val qSlope: Double = 6.0,
@@ -83,7 +101,15 @@ data class BeaconTrack(
     val refAt1m: Double
 )
 
-enum class GuideEventKind { START, AT_SPOT, PASSED, ARRIVED, WRONG_WAY, COLDER, LOST, FOUND }
+enum class GuideEventKind {
+    START, AT_SPOT, PASSED, ARRIVED, WRONG_WAY, COLDER, LOST, FOUND,
+    /** Te sales de la ruta (hacia otra baliza del lugar, o alejándote de la anterior y de la siguiente). */
+    OFF_ROUTE,
+    /** Vuelves a la ruta o, tras llegar, otra vez al destino. */
+    RETURNED,
+    /** Tras llegar: te alejas del destino. */
+    LEAVING
+}
 
 data class GuideEvent(val tMs: Long, val kind: GuideEventKind, val text: String, val spotId: String? = null)
 
@@ -101,7 +127,11 @@ data class GuideState(
     val arrived: Boolean = false,
     val instruction: String = "",
     val moving: Boolean? = null,
-    val lost: Boolean = false
+    val lost: Boolean = false,
+    /** Fuera de la ruta ahora mismo. */
+    val offRoute: Boolean = false,
+    /** Ya llegaste, pero ahora estás lejos del destino. */
+    val away: Boolean = false
 )
 
 class GuideEngine(
@@ -110,7 +140,11 @@ class GuideEngine(
     private val refAt1m: (String) -> Double?,
     /** Nivel de contacto del perfil de cada baliza (o null). */
     private val contactOf: (String) -> Double?,
-    val params: GuideParams = GuideParams()
+    val params: GuideParams = GuideParams(),
+    /** Las demás balizas del lugar (no están en la ruta): sirven para avisar «te desvías hacia…». */
+    others: List<GuideSpot> = emptyList(),
+    /** Indicación de cada tramo (del punto i al i+1): «Gira a la izquierda y camina 2 metros hasta Baño». Opcional. */
+    private val legs: List<String> = emptyList()
 ) {
     init { require(route.isNotEmpty()) { "La ruta necesita al menos un punto" } }
 
@@ -140,6 +174,7 @@ class GuideEngine(
 
     private val beacons = mutableMapOf<String, Beacon>()
     private val spotOfBeacon = route.withIndex().associate { (i, s) -> s.beacon to i }
+    private val otherSpots = others.filter { it.beacon !in spotOfBeacon }.associateBy { it.beacon }
     private val events = ArrayList<GuideEvent>()
 
     private var started = false
@@ -159,15 +194,25 @@ class GuideEngine(
     private var lost = false
     private var moving: Boolean? = null
     private var instruction = ""
+    private var offRoute = false
+    private var strayBeacon: String? = null
+    private var straySince = 0L
+    private var lastOffRouteMs = -1_000_000L
+    private var backOnSince = -1L
+    private var farSince = -1L
+    private var away = false
+    private var leaveSince = -1L
+    private var returnSince = -1L
+    private var lastLeaveMs = -1_000_000L
 
     var state: GuideState = GuideState(); private set
 
     fun ref(b: String): Double = refAt1m(b) ?: params.defaultRefAt1m
     fun contact(b: String): Double = contactOf(b) ?: (ref(b) + params.contactAboveRef)
 
-    /** Una muestra nueva de una baliza. Las que no son de la ruta se ignoran. */
+    /** Una muestra nueva de una baliza. Las que no son de la ruta ni del lugar se ignoran. */
     fun onSample(beacon: String, rssi: Int, tMs: Long) {
-        if (beacon !in spotOfBeacon) return
+        if (beacon !in spotOfBeacon && beacon !in otherSpots) return
         val z = rssi.toDouble().coerceAtLeast(-105.0)
         val b = beacons.getOrPut(beacon) { Beacon(Kalman(z, tMs), tMs, rssi, tMs) }
         b.kf.update(z, tMs, params.qLevel, params.qSlope, params.rMeas)
@@ -191,8 +236,11 @@ class GuideEngine(
         if (!started) {
             started = true
             val dest = route.last()
-            emit(GuideEventKind.START, if (route.size == 1) "Guía iniciada. Destino: ${dest.label}."
-            else "Guía iniciada. Destino: ${dest.label}. Primero, ${route[0].label}.")
+            emit(GuideEventKind.START, when {
+                route.size == 1 -> "Guía iniciada. Destino: ${dest.label}."
+                legs.isNotEmpty() -> "Guía iniciada hacia ${dest.label}. ${legs[0]}"
+                else -> "Guía iniciada. Destino: ${dest.label}. Primero, ${route[0].label}."
+            })
         }
 
         // Caducidad
@@ -211,7 +259,8 @@ class GuideEngine(
             }
             val temp = ((lvl - params.floorDbm) / (c - params.floorDbm)).coerceIn(0.0, 1.0)
             BeaconTrack(name, lvl, b.kf.slope, b.zone, lvl - r, temp, b.times.size / 2.0, b.lastRaw, c, r)
-        }.sortedBy { spotOfBeacon[it.beacon] }
+        }.sortedBy { spotOfBeacon[it.beacon] ?: 99 }
+        val routeTracks = tracks.filter { it.beacon in spotOfBeacon }
 
         // Sin señal
         if (lastHeardMs >= 0 && tMs - lastHeardMs >= params.lostMs && !lost) {
@@ -222,7 +271,7 @@ class GuideEngine(
 
         // ¿Junto a qué punto estás? El de mayor nivel relativo (cerca, ≈ 1,25 m o menos), dominando a los demás.
         val warm = tracks.filter { tr -> beacons[tr.beacon]?.let { it.count >= params.warmupSamples && tMs - it.firstMs >= params.warmupMs } == true }
-        val best = warm.filter { it.relDb >= params.spotMinRelDb || it.zone >= Zone.CERCA }.maxByOrNull { it.relDb }
+        val best = warm.filter { it.beacon in spotOfBeacon && (it.relDb >= params.spotMinRelDb || it.zone >= Zone.CERCA) }.maxByOrNull { it.relDb }
         val second = tracks.filter { it.beacon != best?.beacon }.maxOfOrNull { it.relDb } ?: -99.0
         val c = best?.let { spotOfBeacon[it.beacon] } ?: -1
         val dom = best?.let { it.relDb - second } ?: 0.0
@@ -257,20 +306,96 @@ class GuideEngine(
             if (ok) { arrived = true; emit(GuideEventKind.ARRIVED, "Llegaste a ${route.last().label}.", route.last().id) }
         }
 
-        // Frío/caliente y "te alejas" respecto al punto objetivo.
         val tgt = route.getOrNull(target)
         val tt = tgt?.let { s -> tracks.firstOrNull { it.beacon == s.beacon } }
+
+        // Tras llegar la guía NO termina: vigila si te alejas del destino y si vuelves.
+        if (arrived) {
+            val dest = route.last()
+            val dt = tracks.firstOrNull { it.beacon == dest.beacon }
+            val nearDest = dt != null && (dt.zone >= Zone.CERCA || dt.relDb >= params.spotMinRelDb)
+            val farDest = dt == null || (dt.zone < Zone.CERCA && dt.relDb < params.leaveRelDb)
+            if (!away) {
+                if (farDest) {
+                    if (leaveSince < 0) leaveSince = tMs
+                    if (tMs - leaveSince >= params.leaveHoldMs) {
+                        away = true; lastLeaveMs = tMs; returnSince = -1L
+                        emit(GuideEventKind.LEAVING, "Te estás alejando de ${dest.label}. Da la vuelta y vuelve; los pitidos te guían.", dest.id)
+                    }
+                } else leaveSince = -1L
+            } else if (nearDest) {
+                if (returnSince < 0) returnSince = tMs
+                if (tMs - returnSince >= params.spotHoldMs) {
+                    away = false; leaveSince = -1L; returnSince = -1L
+                    emit(GuideEventKind.RETURNED, "Estás otra vez en ${dest.label}.", dest.id)
+                }
+            } else {
+                returnSince = -1L
+                if (tMs - lastLeaveMs >= params.leaveRepeatMs && (dt == null || dt.slope < 0)) {
+                    lastLeaveMs = tMs
+                    emit(GuideEventKind.LEAVING, "Sigues alejándote de ${dest.label}. Da la vuelta.", dest.id)
+                }
+            }
+        }
+
+        // Desvío hacia una baliza del lugar que no es de la ruta (p. ej. vas al Baño y te metes en el Pasillo A).
+        val stray = warm.filter { it.beacon in otherSpots && (it.relDb >= params.spotMinRelDb || it.zone >= Zone.CERCA) }.maxByOrNull { it.relDb }
+        val routeBest = routeTracks.maxOfOrNull { it.relDb } ?: -99.0
+        if (!arrived && tgt != null && stray != null && stray.relDb - routeBest >= params.dominanceDb) {
+            if (strayBeacon != stray.beacon) { strayBeacon = stray.beacon; straySince = tMs }
+            if (tMs - straySince >= params.offRouteHoldMs && tMs - lastOffRouteMs >= params.offRouteRepeatMs) {
+                lastOffRouteMs = tMs; offRoute = true; backOnSince = -1L
+                emit(GuideEventKind.OFF_ROUTE, "Te desvías hacia ${otherSpots[stray.beacon]!!.label}, que no está en tu camino. Vuelve hacia ${tgt.label}.", tgt.id)
+            }
+        } else strayBeacon = null
+
+        // Frío/caliente y "te alejas" respecto al punto objetivo. Si además te alejas del punto anterior, te sales de la ruta.
         if (!arrived && tt != null && isMoving != false && tt.slope <= params.colderSlope && tt.temperature < 0.8) {
             if (colderSince < 0) colderSince = tMs
             if (tMs - colderSince >= params.colderHoldMs && tMs - lastColderMs >= params.colderRepeatMs) {
-                lastColderMs = tMs; emit(GuideEventKind.COLDER, "Te alejas de ${tgt.label}.", tgt.id)
+                lastColderMs = tMs
+                val prev = route.getOrNull(progress)?.takeIf { progress in 0 until target }
+                val pt = prev?.let { p -> tracks.firstOrNull { it.beacon == p.beacon } }
+                if (prev != null && pt != null && pt.slope <= params.colderSlope / 2 && pt.zone < Zone.CERCA) {
+                    offRoute = true; backOnSince = -1L; lastOffRouteMs = tMs
+                    emit(GuideEventKind.OFF_ROUTE, "Te estás saliendo de la ruta. Vuelve hacia ${prev.label} y desde ahí sigue hacia ${tgt.label}.", tgt.id)
+                } else emit(GuideEventKind.COLDER, "Te alejas de ${tgt.label}. Da la vuelta.", tgt.id)
             }
         } else colderSince = -1L
+
+        // Fuera de ruta por distancia: lejos del punto anterior y más lejos del siguiente que la longitud del tramo.
+        val prevSpot = route.getOrNull(progress)?.takeIf { progress in 0 until target }
+        val prevTrack = prevSpot?.let { p -> tracks.firstOrNull { it.beacon == p.beacon } }
+        if (!arrived && !offRoute && tgt != null && prevSpot != null) {
+            val legLen = hypot(tgt.x - prevSpot.x, tgt.y - prevSpot.y).coerceAtLeast(0.5)
+            val expected = -20.0 * log10(legLen)
+            val leftPrev = prevTrack == null || (prevTrack.zone < Zone.CERCA && prevTrack.relDb < params.spotMinRelDb)
+            val tooFar = tt == null || tt.relDb < expected - params.offRouteFarMarginDb
+            if (leftPrev && tooFar) {
+                if (farSince < 0) farSince = tMs
+                if (tMs - farSince >= params.offRouteFarHoldMs && tMs - lastOffRouteMs >= params.offRouteRepeatMs) {
+                    lastOffRouteMs = tMs; offRoute = true; backOnSince = -1L; farSince = -1L
+                    emit(GuideEventKind.OFF_ROUTE, "Te estás saliendo de la ruta. Vuelve hacia ${prevSpot.label} y desde ahí sigue hacia ${tgt.label}.", tgt.id)
+                }
+            } else farSince = -1L
+        } else farSince = -1L
+
+        // ¿Volviste a la ruta? El objetivo vuelve a subir un rato (o estás junto a un punto de la ruta) y nada te desvía.
+        if (offRoute) {
+            val recovering = strayBeacon == null && ((tt != null && tt.slope >= params.backOnRouteSlope) || at >= 0)
+            if (recovering) {
+                if (backOnSince < 0) backOnSince = tMs
+                if (tMs - backOnSince >= params.backOnRouteHoldMs || at >= 0) {
+                    offRoute = false; backOnSince = -1L
+                    if (!arrived) emit(GuideEventKind.RETURNED, "Bien, vuelves a la ruta hacia ${tgt?.label ?: route.last().label}.", tgt?.id)
+                }
+            } else backOnSince = -1L
+        }
 
         state = GuideState(
             tracks = tracks, progress = progress, target = target, atSpot = route.getOrNull(at)?.id,
             targetTemperature = tt?.temperature ?: 0.0, targetSlope = tt?.slope ?: 0.0, targetZone = tt?.zone ?: Zone.LEJOS,
-            arrived = arrived, instruction = instruction, moving = isMoving, lost = lost
+            arrived = arrived, instruction = instruction, moving = isMoving, lost = lost, offRoute = offRoute, away = away
         )
         return fresh
     }
@@ -286,10 +411,16 @@ class GuideEngine(
                     emit(GuideEventKind.AT_SPOT, (if (skipped.isNotEmpty()) "Pasaste ${skipped.joinToString { it.label }}. " else "") +
                         "Te acercas a ${s.label}, tu destino. Sigue despacio.", s.id)
                 } else {
+                    val first = progress <= 0 && i == 0
                     target = i + 1
                     val next = route[target]
-                    emit(GuideEventKind.PASSED, (if (skipped.isNotEmpty()) "Pasaste ${skipped.joinToString { it.label }}. " else "") +
-                        "${s.label}. Sigue: ${next.label} a ${meters(s, next)}.", s.id)
+                    val leg = legs.getOrNull(i)
+                    // En el punto de salida con indicaciones se repite tal cual la del arranque (la sesión no la dice dos veces).
+                    emit(GuideEventKind.PASSED, (if (skipped.isNotEmpty()) "Pasaste ${skipped.joinToString { it.label }}. " else "") + when {
+                        leg != null && first -> leg
+                        leg != null -> "${s.label}. $leg"
+                        else -> "${s.label}. Sigue: ${next.label} a ${meters(s, next)}."
+                    }, s.id)
                 }
             }
             i < progress -> {

@@ -4,32 +4,29 @@ import android.content.Context
 import com.example.openview.nav.GuideSpot
 
 /**
- * El lugar que recorre la persona usuaria con «Iniciar»: sus puntos (destinos) en el orden de la línea guía, cada uno
- * con su baliza. Sale del escenario elegido en el panel de administración y de la baliza asignada a cada posición
- * (la que se usó por última vez en la prueba guiada o en la guía de prueba). Si ese escenario no tiene balizas
- * asignadas, se usa la ruta activa.
+ * El lugar que recorre la persona usuaria con «Iniciar».
+ *
+ * 1. El lugar ACTIVO descargado del guardia (o cargado a mano): balizas con nombre propio y sus rutas.
+ * 2. Si no hay ninguno, el escenario de prueba del panel de administración con sus balizas asignadas (en línea).
+ * 3. Si tampoco, la ruta activa del panel.
  */
 object GuidePlaces {
 
-    data class Place(val name: String, val spots: List<GuideSpot>)
-
-    fun current(): Place? {
-        val setup = TestSetupRepository.selected
-        val beacons = TestSetupRepository.assignmentFor(setup.id)?.takeIf { it.size == setup.spots.size }
-        if (beacons != null) {
-            return Place(setup.name, setup.spots.mapIndexed { i, s -> GuideSpot(s.id, s.label, beacons[i], s.x, s.y) })
-        }
-        val g = RouteRepository.activeGraph
-        val spots = g.nodes.filter { it.beaconName != null }.map { GuideSpot(it.id, it.label, it.beaconName!!, it.x, it.y) }
-        return if (spots.size >= 2) Place("Ruta activa", spots) else null
+    data class Place(val place: SharedPlace, val downloaded: Boolean) {
+        val name: String get() = place.name
+        val spots: List<GuideSpot> get() = place.beacons.map { GuideSpot(it.beacon, it.name, it.beacon, it.x, it.y) }
     }
 
-    /**
-     * Ruta desde el punto donde estás ([fromIdx]) hasta el destino ([toIdx]), siguiendo el orden de la línea guía
-     * en el sentido que haga falta.
-     */
-    fun route(place: Place, fromIdx: Int, toIdx: Int): List<GuideSpot> =
-        if (fromIdx <= toIdx) place.spots.subList(fromIdx, toIdx + 1) else place.spots.subList(toIdx, fromIdx + 1).reversed()
+    fun current(): Place? {
+        PlaceStore.active?.let { return Place(it.place, downloaded = true) }
+        val setup = TestSetupRepository.selected
+        val beacons = TestSetupRepository.assignmentFor(setup.id)?.takeIf { it.size == setup.spots.size && it.toSet().size == it.size }
+        val spots = if (beacons != null) setup.spots.mapIndexed { i, s -> PlaceBeacon(beacons[i], s.label, s.x, s.y) }
+        else RouteRepository.activeGraph.nodes.filter { it.beaconName != null }.map { PlaceBeacon(it.beaconName!!, it.label, it.x, it.y) }
+        if (spots.size < 2 || spots.map { it.beacon }.toSet().size != spots.size) return null
+        val name = if (beacons != null) setup.name else "Ruta activa"
+        return Place(SharedPlace("local_" + (if (beacons != null) setup.id else "ruta"), name, spots, spots.zipWithNext { a, b -> a.beacon to b.beacon }), downloaded = false)
+    }
 }
 
 /** Configuración de voz y avisos de la persona usuaria. Se guarda en el teléfono. */

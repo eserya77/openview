@@ -29,12 +29,15 @@ import com.example.openview.ui.components.rememberScreenReader
 
 /** Consejos de uso de la guía. Se leen en voz alta al entrar y cada uno al tocarlo. */
 val HELP_ITEMS = listOf(
-    "Toca Iniciar, elige a dónde quieres ir y camina junto a la pared guía.",
-    "Al empezar, la app busca dónde estás. Quédate quieto unos segundos.",
+    "Al entrar a un establecimiento, tu móvil te avisa si el guardia comparte sus rutas. Toca Descargar y usar.",
+    "Si no te avisa, abre Rutas del lugar y toca Pedir rutas al guardia. Dile el código de 4 cifras que oirás.",
+    "Toca Iniciar y quédate quieto unos segundos: la app te dice en qué punto estás y qué destinos hay.",
+    "Elige un destino. Te dirá por dónde ir: camina recto, gira a la izquierda o a la derecha, y cuántos metros.",
     "Oirás pitidos: más rápidos y más agudos cuanto más cerca estás del siguiente punto.",
-    "En cada punto el móvil vibra una vez y te dice su nombre y cuánto falta para el siguiente.",
-    "Si vas en sentido contrario, notarás una vibración larga y te dirá que des la vuelta.",
-    "Al llegar, vibra tres veces y dice: llegaste. Detente ahí.",
+    "En cada punto el móvil vibra una vez y te dice la siguiente indicación.",
+    "Si te sales de la ruta o vas hacia otro punto, notarás una vibración larga y te dirá hacia dónde volver.",
+    "Al llegar, vibra tres veces y dice: llegaste. La guía sigue atenta: si te alejas del destino, te avisa.",
+    "Cuando termines, toca el botón Terminar.",
     "Pulsa el botón de subir volumen en cualquier momento para repetir la última instrucción.",
     "Lleva el móvil colgado al pecho, con la pantalla hacia fuera.",
     "En Configurar voz puedes cambiar la velocidad de la voz, el volumen, los pitidos y la vibración."

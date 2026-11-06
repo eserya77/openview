@@ -31,7 +31,19 @@ val NeutralInk = Color(0xFF0E2226) // Texto principal
 val NeutralGrey = Color(0xFF37474F)
 val SurfaceLight = Color(0xFFF2FBFC)
 
-// Tonos para modo oscuro
+// Tonos para modo oscuro, repartidos con la regla 60-30-10 (paleta análoga de verde azulado, tono ≈ 185°):
+//  60 % dominante  → fondo y superficie (DarkBg, DarkSurface): muy oscuros y poco saturados, no cansan la vista.
+//  30 % secundario → contenedores de la misma familia (Turquoise800, DarkContainer, DarkContainerHigh).
+//  10 % acento     → Turquoise200Dark, solo en la acción principal, el foco y el progreso.
+//  Colores de estado (verde éxito, rojo desvío o error, ámbar aviso) solo en mensajes y siempre con icono y texto.
 val Turquoise200Dark = Color(0xFF4DD0E1)
 val DarkBg = Color(0xFF071416)
 val DarkSurface = Color(0xFF0E2226)
+val DarkContainer = Color(0xFF12383D)
+val DarkContainerHigh = Color(0xFF1D4C52)
+val DarkOnVariant = Color(0xFF9FB9BD)
+val DarkOutline = Color(0xFF5E7C80)
+val DarkOutlineVariant = Color(0xFF2C4448)
+val ErrorContainerDark = Color(0xFF5C1A1A)
+val OnErrorContainerDark = Color(0xFFFFDAD6)
+val WarnAmber = Color(0xFFF2C94C)

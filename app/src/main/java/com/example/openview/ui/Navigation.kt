@@ -13,6 +13,16 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalView
+import com.example.openview.share.ShareHub
+import com.example.openview.share.hasSharePermissions
+import com.example.openview.share.requiredSharePermissions
+import com.example.openview.ui.components.isTalkBackOn
 import com.example.openview.ble.estimateMetersFromRssi
 import com.example.openview.ble.hasBlePermissions
 import com.example.openview.ble.rememberBleScanner
@@ -31,8 +41,10 @@ import com.example.openview.ui.screens.ArrivalScreen
 import com.example.openview.ui.screens.DestinationSelectionScreen
 import com.example.openview.ui.screens.FailureScreen
 import com.example.openview.ui.screens.GraphShapeScreen
-import com.example.openview.ui.screens.GuideDestinationScreen
+import com.example.openview.ui.screens.GuardScreen
 import com.example.openview.ui.screens.GuideRunScreen
+import com.example.openview.ui.screens.GuideStartScreen
+import com.example.openview.ui.screens.PlaceRoutesScreen
 import com.example.openview.ui.screens.HelpScreen
 import com.example.openview.ui.screens.OnboardingScreen
 import com.example.openview.ui.screens.RoutePreviewScreen
@@ -58,9 +70,13 @@ object Routes {
     const val SIMULATOR_PREVIEW = "simulator_preview"
     const val SIMULATOR_ACTIVE_NAV = "simulator_active_nav"
     /** Guía del producto (botón «Iniciar»). */
-    const val GUIDE_DEST = "guide_dest"
-    const val GUIDE_RUN = "guide_run/{dest}"
-    fun guideRun(dest: Int) = "guide_run/$dest"
+    const val GUIDE_START = "guide_start"
+    const val GUIDE_RUN = "guide_run/{from}/{to}"
+    fun guideRun(from: String, to: String) = "guide_run/$from/$to"
+    /** Rutas del lugar (persona ciega: descargar del guardia o pedírselas). */
+    const val PLACE_ROUTES = "place_routes"
+    /** Modo guardia: compartir el JSON de la empresa. */
+    const val GUARD = "guard"
 }
 
 @Composable
@@ -81,6 +97,35 @@ fun OpenViewApp(
         // velocidad: 0..1 -> 0.5x..2.0x (0.5 ≈ normal)
         tts.rate = 0.5f + state.voiceSettings.speed * 1.5f
         tts.volume = state.voiceSettings.volume
+    }
+
+    // ── Compartir rutas (guardia ↔ persona ciega) ──
+    // Se escucha a los guardias en las pantallas de la persona usuaria; durante la guía y en el panel de
+    // administración no (ahí el Bluetooth es para las balizas), salvo que el guardia esté compartiendo o haya una
+    // petición en curso.
+    val view = LocalView.current
+    val backEntry by navController.currentBackStackEntryAsState()
+    val hub by ShareHub.state.collectAsState()
+    var permTick by remember { mutableIntStateOf(0) }
+    val sharePerms = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permTick++ }
+    LaunchedEffect(Unit) {
+        if (!hasSharePermissions(context)) {
+            val extra = if (android.os.Build.VERSION.SDK_INT >= 33) arrayOf(android.Manifest.permission.POST_NOTIFICATIONS) else emptyArray()
+            sharePerms.launch(requiredSharePermissions() + extra)
+        }
+    }
+    val listenRoutes = setOf(Routes.ONBOARDING, Routes.GUIDE_START, Routes.PLACE_ROUTES, Routes.GUARD, Routes.HELP, Routes.VOICE_CONFIG)
+    LaunchedEffect(backEntry?.destination?.route, hub.guardSharing, hub.myCode, permTick, bleState.bluetoothEnabled) {
+        ShareHub.listen(backEntry?.destination?.route in listenRoutes || hub.guardSharing || hub.myCode != null)
+    }
+    // Lo que avisa el módulo de compartir (rutas disponibles, descarga lista…): voz, o TalkBack si está activado.
+    LaunchedEffect(Unit) {
+        ShareHub.announcements.collect { msg -> if (isTalkBackOn(context)) view.announceForAccessibility(msg) else tts.speak(msg) }
+    }
+    // Tocar la notificación «Rutas disponibles en…» abre Rutas del lugar.
+    val openRoutes by ShareHub.openRoutesRequest.collectAsState()
+    LaunchedEffect(openRoutes) {
+        if (openRoutes) { ShareHub.openRoutesRequest.value = false; navController.navigate(Routes.PLACE_ROUTES) { launchSingleTop = true } }
     }
 
     // El posicionador v3 usa el orden de la ruta activa (solo avanza al siguiente punto).
@@ -166,7 +211,9 @@ fun OpenViewApp(
         composable(Routes.ONBOARDING) {
             OnboardingScreen(
                 tts = tts,
-                onStart = { navController.navigate(Routes.GUIDE_DEST) },
+                onStart = { navController.navigate(Routes.GUIDE_START) },
+                onRoutes = { navController.navigate(Routes.PLACE_ROUTES) },
+                onGuard = { navController.navigate(Routes.GUARD) },
                 onConfigureVoice = { navController.navigate(Routes.VOICE_CONFIG) },
                 onHelp = { navController.navigate(Routes.HELP) },
                 onAdmin = { navController.navigate(Routes.ADMIN_BLE) },
@@ -351,25 +398,42 @@ fun OpenViewApp(
             HelpScreen(tts = tts, onBack = { navController.popBackStack() })
         }
 
-        composable(Routes.GUIDE_DEST) {
-            GuideDestinationScreen(
+        composable(Routes.GUIDE_START) {
+            GuideStartScreen(
+                scanner = bleScanner,
                 tts = tts,
-                onSelect = { i -> navController.navigate(Routes.guideRun(i)) },
+                onSelect = { from, to -> navController.navigate(Routes.guideRun(from, to)) },
+                onRoutes = { navController.navigate(Routes.PLACE_ROUTES) },
                 onHelp = { navController.navigate(Routes.HELP) },
                 onBack = { navController.popBackStack() }
             )
         }
 
         composable(Routes.GUIDE_RUN) { entry ->
-            val dest = entry.arguments?.getString("dest")?.toIntOrNull() ?: 0
             GuideRunScreen(
                 scanner = bleScanner,
                 tts = tts,
                 voice = state.voiceSettings,
-                destIdx = dest,
-                onNewDestination = { navController.popBackStack(Routes.GUIDE_DEST, inclusive = false) },
+                fromBeacon = entry.arguments?.getString("from").orEmpty(),
+                toBeacon = entry.arguments?.getString("to").orEmpty(),
+                // «Ir a otro destino»: vuelve a detectar dónde estás (una pantalla de inicio nueva).
+                onNewDestination = {
+                    navController.navigate(Routes.GUIDE_START) { popUpTo(Routes.ONBOARDING) { inclusive = false } }
+                },
                 onHome = { navController.popBackStack(Routes.ONBOARDING, inclusive = false) }
             )
+        }
+
+        composable(Routes.PLACE_ROUTES) {
+            PlaceRoutesScreen(
+                tts = tts,
+                onStart = { navController.navigate(Routes.GUIDE_START) { popUpTo(Routes.ONBOARDING) { inclusive = false } } },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.GUARD) {
+            GuardScreen(tts = tts, onBack = { navController.popBackStack() })
         }
 
         composable(Routes.ADMIN_BLE) {

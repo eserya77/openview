@@ -447,8 +447,9 @@ fun UserGuideScreen(scanner: BleScanner, statusBar: @Composable () -> Unit, onBa
 @Composable
 private fun eventColor(k: GuideEventKind) = when (k) {
     GuideEventKind.ARRIVED, GuideEventKind.PASSED, GuideEventKind.AT_SPOT -> AdminColors.good
-    GuideEventKind.WRONG_WAY, GuideEventKind.LOST -> AdminColors.bad
-    GuideEventKind.COLDER -> AdminColors.warn
+    GuideEventKind.WRONG_WAY, GuideEventKind.LOST, GuideEventKind.OFF_ROUTE -> AdminColors.bad
+    GuideEventKind.COLDER, GuideEventKind.LEAVING -> AdminColors.warn
+    GuideEventKind.RETURNED -> AdminColors.good
     else -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 

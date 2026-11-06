@@ -26,12 +26,28 @@ class MainActivity : ComponentActivity() {
         TestSetupRepository.initialize(applicationContext)
         FingerprintRepository.initialize(applicationContext)
         com.example.openview.data.VoicePrefs.initialize(applicationContext)
+        com.example.openview.data.PlaceStore.initialize(applicationContext)
+        com.example.openview.share.ShareHub.initialize(applicationContext)
+        handleIntent(intent)
         setContent {
             OpenviewTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     OpenViewApp(modifier = Modifier.padding(innerPadding))
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    /** Al tocar la notificación «Rutas disponibles en…» se abre la pantalla Rutas del lugar. */
+    private fun handleIntent(intent: android.content.Intent?) {
+        if (intent?.getBooleanExtra(com.example.openview.share.ShareHub.EXTRA_OPEN_ROUTES, false) == true) {
+            com.example.openview.share.ShareHub.openRoutesRequest.value = true
+            intent.removeExtra(com.example.openview.share.ShareHub.EXTRA_OPEN_ROUTES)
         }
     }
 

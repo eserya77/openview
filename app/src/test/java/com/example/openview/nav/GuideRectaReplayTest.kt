@@ -43,6 +43,8 @@ class GuideRectaReplayTest {
         assertEquals(dump, route.map { it.id }, reached)
         assertEquals(dump, 1, ev.count { it.kind == GuideEventKind.ARRIVED })
         assertTrue(dump, ev.none { it.kind == GuideEventKind.WRONG_WAY })
+        // Vueltas correctas: el aviso nuevo de «fuera de ruta» no debe saltar.
+        assertTrue(dump, ev.none { it.kind == GuideEventKind.OFF_ROUTE })
     }
 
     @Test fun ida() = check("guia_recta_ida_124628.csv", listOf(p1, p2, p3))

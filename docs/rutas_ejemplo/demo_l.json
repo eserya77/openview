@@ -1,0 +1,92 @@
+{
+  "formato": "openview-lugar",
+  "version": 1,
+  "id": "demo_l",
+  "nombre": "Plaza San Miguel (prueba en L)",
+  "empresa": "Ejemplo: 3 balizas en L, 2 m cada tramo; en Pasillo A se gira.",
+  "entrada": "NAV_BLE_01",
+  "balizas": [
+    {
+      "baliza": "NAV_BLE_01",
+      "nombre": "Entrada",
+      "x": 0.0,
+      "y": 0.0,
+      "mirando": 0.0,
+      "aviso": "Estás en la entrada. De espaldas a la puerta, el interior queda de frente."
+    },
+    {
+      "baliza": "NAV_BLE_02",
+      "nombre": "Pasillo A",
+      "x": 2.0,
+      "y": 0.0
+    },
+    {
+      "baliza": "NAV_BLE_03",
+      "nombre": "Baño",
+      "x": 2.0,
+      "y": 2.0
+    }
+  ],
+  "conexiones": [
+    [
+      "NAV_BLE_01",
+      "NAV_BLE_02"
+    ],
+    [
+      "NAV_BLE_02",
+      "NAV_BLE_03"
+    ]
+  ],
+  "rutas": [
+    {
+      "desde": "NAV_BLE_01",
+      "hasta": "NAV_BLE_02",
+      "pasos": [
+        "NAV_BLE_01",
+        "NAV_BLE_02"
+      ]
+    },
+    {
+      "desde": "NAV_BLE_01",
+      "hasta": "NAV_BLE_03",
+      "pasos": [
+        "NAV_BLE_01",
+        "NAV_BLE_02",
+        "NAV_BLE_03"
+      ]
+    },
+    {
+      "desde": "NAV_BLE_02",
+      "hasta": "NAV_BLE_01",
+      "pasos": [
+        "NAV_BLE_02",
+        "NAV_BLE_01"
+      ]
+    },
+    {
+      "desde": "NAV_BLE_02",
+      "hasta": "NAV_BLE_03",
+      "pasos": [
+        "NAV_BLE_02",
+        "NAV_BLE_03"
+      ]
+    },
+    {
+      "desde": "NAV_BLE_03",
+      "hasta": "NAV_BLE_01",
+      "pasos": [
+        "NAV_BLE_03",
+        "NAV_BLE_02",
+        "NAV_BLE_01"
+      ]
+    },
+    {
+      "desde": "NAV_BLE_03",
+      "hasta": "NAV_BLE_02",
+      "pasos": [
+        "NAV_BLE_03",
+        "NAV_BLE_02"
+      ]
+    }
+  ]
+}

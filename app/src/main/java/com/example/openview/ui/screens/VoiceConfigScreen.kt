@@ -142,8 +142,10 @@ fun VoiceConfigScreen(
 
 @Composable
 private fun SliderSetting(label: String, value: Float, valueText: String, onChange: (Float) -> Unit) {
-    Column(Modifier.fillMaxWidth()) {
-        Text("$label: $valueText", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground)
+    // Cada ajuste va en un contenedor del color secundario (regla 60-30-10: fondo 60 %, contenedores 30 %, acento 10 %).
+    androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Text("$label: $valueText", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSecondaryContainer)
         Slider(
             value = value,
             onValueChange = onChange,
@@ -151,22 +153,25 @@ private fun SliderSetting(label: String, value: Float, valueText: String, onChan
             modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).semantics { contentDescription = label; stateDescription = valueText }
         )
     }
+    }
 }
 
 @Composable
 private fun ToggleSetting(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .fillMaxWidth().heightIn(min = 72.dp)
+            .fillMaxWidth().heightIn(min = 72.dp).padding(horizontal = 16.dp, vertical = 8.dp)
             .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)
             .semantics(mergeDescendants = true) { stateDescription = if (checked) "activado" else "desactivado" }
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground)
+            Text(title, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSecondaryContainer)
             Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.width(12.dp))
         Switch(checked = checked, onCheckedChange = null)
+    }
     }
 }
