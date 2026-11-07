@@ -120,25 +120,25 @@ fun PlaceRoutesScreen(tts: TtsController, onStart: () -> Unit, onBack: () -> Uni
         reader,
         "Rutas del lugar.",
         if (offers.isNotEmpty()) "Hay rutas disponibles en ${offers.first().name ?: "un establecimiento cercano"}. El botón Descargar está arriba."
-        else "Buscando guardias cercanos que compartan rutas.",
-        "Si no aparece ninguno, toca Pedir rutas al guardia."
+        else "Buscando empleados cercanos que compartan rutas.",
+        "Si no aparece ninguno, toca Pedir rutas al empleado."
     )
 
     ScreenScaffold(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         ScreenTitle("Rutas del lugar")
         if (!granted) {
-            Text("Necesito permiso de Bluetooth para encontrar al guardia.", style = MaterialTheme.typography.titleLarge)
+            Text("Necesito permiso de Bluetooth para encontrar al empleado.", style = MaterialTheme.typography.titleLarge)
             PrimaryActionButton("Dar permiso", onClick = { permLauncher.launch(sharePermissionsWithNotifications()) })
         }
 
         // Estado de la descarga
         when (val d = hub.download) {
-            is ShareHub.Download.Running -> StatusCard("Descargando rutas de ${d.name}…", if (d.attempt > 1) "Intento ${d.attempt} de 3" else "No te alejes del guardia.", progress = d.progress)
+            is ShareHub.Download.Running -> StatusCard("Descargando rutas de ${d.name}…", if (d.attempt > 1) "Intento ${d.attempt} de 3" else "No te alejes del empleado.", progress = d.progress)
             is ShareHub.Download.Done -> {
                 StatusCard("Rutas de ${d.name} listas", "Ya puedes elegir a dónde ir.", icon = true)
                 PrimaryActionButton("Iniciar", icon = Icons.Filled.PlayArrow, modifier = Modifier.heightIn(min = 104.dp), onClick = reader.click("Iniciar") { ShareHub.clearDownloadStatus(); onStart() })
             }
-            is ShareHub.Download.Failed -> StatusCard("No se pudieron descargar", d.message + " Acércate al guardia e inténtalo otra vez.", error = true)
+            is ShareHub.Download.Failed -> StatusCard("No se pudieron descargar", d.message + " Acércate al empleado e inténtalo otra vez.", error = true)
             else -> Unit
         }
 
@@ -146,7 +146,7 @@ fun PlaceRoutesScreen(tts: TtsController, onStart: () -> Unit, onBack: () -> Uni
         SectionTitle("Cerca de ti")
         if (offers.isEmpty()) {
             Text(
-                if (hub.listening) "Buscando guardias que compartan rutas…" else "La búsqueda está parada.",
+                if (hub.listening) "Buscando empleados que compartan rutas…" else "La búsqueda está parada.",
                 style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite }
             )
@@ -155,14 +155,14 @@ fun PlaceRoutesScreen(tts: TtsController, onStart: () -> Unit, onBack: () -> Uni
             onDownload = reader.click("Descargar") { ShareHub.download(o) }, onUse = reader.click("Usar") { onStart() }) }
 
         // Escenario 2: pedir las rutas directamente
-        SectionTitle("Pedir rutas al guardia")
+        SectionTitle("Pedir rutas al empleado")
         val code = hub.myCode
         if (code == null) {
-            Text("Si el guardia no las anuncia, pídeselas: tu teléfono dirá un código y el guardia te las enviará.", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.fillMaxWidth())
-            PrimaryActionButton("Pedir rutas al guardia", icon = Icons.Filled.Campaign, containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            Text("Si el empleado no las anuncia, pídeselas: tu teléfono dirá un código y el empleado te las enviará.", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.fillMaxWidth())
+            PrimaryActionButton("Pedir rutas al empleado", icon = Icons.Filled.Campaign, containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                 onClick = {
                     ShareHub.requestRoutes { c, err ->
-                        if (c != null) tts.speak("Dile al guardia este código: ${ShareProtocol.spoken(c)}. Él tocará Enviar en su teléfono. Mantén la app abierta.")
+                        if (c != null) tts.speak("Dile al empleado este código: ${ShareProtocol.spoken(c)}. Tocará Enviar en su teléfono. Mantén la app abierta.")
                         else tts.speak(err ?: "No se pudo pedir.")
                     }
                 })
@@ -170,10 +170,10 @@ fun PlaceRoutesScreen(tts: TtsController, onStart: () -> Unit, onBack: () -> Uni
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer, contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
                 shape = RoundedCornerShape(24.dp),
-                modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) { contentDescription = "Tu código: ${ShareProtocol.spoken(code)}. Díselo al guardia." }
+                modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) { contentDescription = "Tu código: ${ShareProtocol.spoken(code)}. Díselo al empleado." }
             ) {
                 Column(Modifier.fillMaxWidth().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Dile al guardia este código", style = MaterialTheme.typography.titleLarge)
+                    Text("Dile al empleado este código", style = MaterialTheme.typography.titleLarge)
                     Text(code.toString().toCharArray().joinToString(" "), fontSize = 64.sp, fontWeight = FontWeight.Black, letterSpacing = 4.sp)
                     Text("Esperando a que te las envíe…", style = MaterialTheme.typography.bodyLarge)
                 }
@@ -210,7 +210,7 @@ fun PlaceRoutesScreen(tts: TtsController, onStart: () -> Unit, onBack: () -> Uni
         // Pruebas con un solo teléfono
         TextButton(onClick = { more = !more }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
             Icon(if (more) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, null)
-            Text(if (more) "Ocultar opciones de prueba" else "Opciones de prueba (sin guardia)")
+            Text(if (more) "Ocultar opciones de prueba" else "Opciones de prueba (sin empleado)")
         }
         if (more) {
             DemoPlaces.ALL.forEach { p ->
@@ -251,9 +251,9 @@ private fun OfferCard(o: ShareOffer, have: Boolean, busy: Boolean, onDownload: (
 }
 
 private fun signalWords(rssi: Int) = when {
-    rssi >= -60 -> "El guardia está muy cerca"
-    rssi >= -75 -> "El guardia está cerca"
-    else -> "El guardia está algo lejos"
+    rssi >= -60 -> "El empleado está muy cerca"
+    rssi >= -75 -> "El empleado está cerca"
+    else -> "El empleado está algo lejos"
 }
 
 @Composable
@@ -303,7 +303,7 @@ fun GuardScreen(tts: TtsController, onBack: () -> Unit) {
     LaunchedEffect(granted) { if (!granted) permLauncher.launch(sharePermissionsWithNotifications()) }
 
     ScreenScaffold(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        ScreenTitle("Modo guardia")
+        ScreenTitle("Modo empleado")
         Text("Comparte las rutas del establecimiento con el teléfono de las personas ciegas, por Bluetooth y sin internet.",
             style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth())
         if (!granted) PrimaryActionButton("Dar permisos de Bluetooth", onClick = { permLauncher.launch(sharePermissionsWithNotifications()) })
@@ -368,7 +368,7 @@ fun GuardScreen(tts: TtsController, onBack: () -> Unit) {
                     Column(Modifier.weight(1f)) {
                         Text("Código", style = MaterialTheme.typography.labelLarge)
                         Text(r.code.toString(), fontSize = 36.sp, fontWeight = FontWeight.Black, letterSpacing = 3.sp)
-                        Text(signalWords(r.rssi).replace("El guardia", "La persona"), style = MaterialTheme.typography.bodyMedium)
+                        Text(signalWords(r.rssi).replace("El empleado", "La persona"), style = MaterialTheme.typography.bodyMedium)
                     }
                     OutlinedButton(onClick = { ShareHub.sendTo(r.code) }, enabled = !sending, modifier = Modifier.heightIn(min = 56.dp)) {
                         Icon(Icons.Filled.Send, null); Spacer(Modifier.width(6.dp)); Text(if (sending) "Enviando…" else "Enviar rutas")

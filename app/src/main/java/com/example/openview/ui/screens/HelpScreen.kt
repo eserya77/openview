@@ -29,8 +29,8 @@ import com.example.openview.ui.components.rememberScreenReader
 
 /** Consejos de uso de la guía. Se leen en voz alta al entrar y cada uno al tocarlo. */
 val HELP_ITEMS = listOf(
-    "Al entrar a un establecimiento, tu móvil te avisa si el guardia comparte sus rutas. Toca Descargar y usar.",
-    "Si no te avisa, abre Rutas del lugar y toca Pedir rutas al guardia. Dile el código de 4 cifras que oirás.",
+    "Al entrar a un establecimiento, tu móvil te avisa si el empleado del lugar comparte sus rutas. Toca Descargar y usar.",
+    "Si no te avisa, abre Rutas del lugar y toca Pedir rutas al empleado. Dile el código de 4 cifras que oirás.",
     "Toca Iniciar y quédate quieto unos segundos: la app te dice en qué punto estás y qué destinos hay.",
     "Elige un destino. Te dirá por dónde ir: camina recto, gira a la izquierda o a la derecha, y cuántos metros.",
     "Oirás pitidos: más rápidos y más agudos cuanto más cerca estás del siguiente punto.",

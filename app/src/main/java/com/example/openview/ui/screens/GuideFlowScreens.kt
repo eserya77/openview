@@ -122,11 +122,11 @@ fun GuideStartScreen(
     if (current == null) {
         LaunchedEffect(Unit) {
             delay(350)
-            tts.speak("Todavía no tienes las rutas de este lugar. Toca Rutas del lugar para descargarlas del guardia, o pídeselas.")
+            tts.speak("Todavía no tienes las rutas de este lugar. Toca Rutas del lugar para descargarlas del empleado, o pídeselas.")
         }
         ScreenScaffold(verticalArrangement = Arrangement.spacedBy(18.dp)) {
             ScreenTitle("Sin rutas de este lugar")
-            Text("Todavía no tienes las rutas de este lugar. Descárgalas del guardia o pídeselas.", style = MaterialTheme.typography.titleLarge)
+            Text("Todavía no tienes las rutas de este lugar. Descárgalas del empleado o pídeselas.", style = MaterialTheme.typography.titleLarge)
             PrimaryActionButton("Rutas del lugar", icon = Icons.Filled.Download, modifier = Modifier.heightIn(min = 96.dp), onClick = reader.click("Rutas del lugar", onRoutes))
             SecondaryActionButton("Volver", icon = Icons.AutoMirrored.Filled.ArrowBack, onClick = reader.click("Volver", onBack))
         }

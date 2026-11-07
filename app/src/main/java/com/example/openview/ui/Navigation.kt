@@ -389,7 +389,10 @@ fun OpenViewApp(
                 },
                 onCancel = {
                     viewModel.cancelRoute()
-                    navController.popBackStack(Routes.DESTINATION, inclusive = false)
+                    // Desde el simulador no hay DESTINATION en la pila: sin esta cadena el botón no hacía nada.
+                    navController.popBackStack(Routes.DESTINATION, inclusive = false) ||
+                        navController.popBackStack(Routes.SIMULATOR_MENU, inclusive = false) ||
+                        navController.popBackStack(Routes.ONBOARDING, inclusive = false)
                 }
             )
         }

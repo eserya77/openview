@@ -176,7 +176,7 @@ object ShareHub {
         if (downloadJob?.isActive == true) return
         val name = offer.name ?: "el establecimiento"
         downloadJob = scope.launch {
-            say(if (automatic) "El guardia te está enviando las rutas de $name. Espera un momento." else "Descargando las rutas de $name.")
+            say(if (automatic) "El empleado te está enviando las rutas de $name. Espera un momento." else "Descargando las rutas de $name.")
             var last: String? = null
             for (attempt in 1..3) {
                 _state.update { it.copy(download = Download.Running(name, 0f, attempt)) }
@@ -197,7 +197,7 @@ object ShareHub {
                 }
             }
             _state.update { it.copy(download = Download.Failed(last ?: "No se pudo descargar.")) }
-            say("No se pudieron descargar las rutas. Acércate al guardia e inténtalo otra vez.")
+            say("No se pudieron descargar las rutas. Acércate al empleado e inténtalo otra vez.")
         }
     }
 

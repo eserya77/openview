@@ -10,7 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -133,7 +133,7 @@ fun OnboardingScreen(
             Text(if (more) "Ocultar opciones de instalación" else "Opciones de instalación y pruebas")
         }
         if (more) {
-            SecondaryActionButton(text = "Modo guardia (compartir rutas)", icon = Icons.Filled.Security, onClick = onGuard)
+            SecondaryActionButton(text = "Modo empleado (compartir rutas)", icon = Icons.Filled.Badge, onClick = onGuard)
             SecondaryActionButton(text = "Panel de administración", icon = Icons.Filled.Bluetooth, onClick = onAdmin)
             SecondaryActionButton(text = "Simulador de ruta", icon = Icons.Filled.VolumeUp, onClick = onSimulator)
             SecondaryActionButton(text = "Forma de prueba (grafo)", icon = Icons.Filled.Timeline, onClick = onChooseShape)

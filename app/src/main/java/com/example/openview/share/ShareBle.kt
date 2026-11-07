@@ -236,12 +236,12 @@ object RouteDownloader {
                 var got: T? = null
                 while (got == null) {
                     val e = ch.receive()
-                    if (e is Ev.Conn && e.state == BluetoothProfile.STATE_DISCONNECTED) throw IOException("Se cortó la conexión con el guardia.")
+                    if (e is Ev.Conn && e.state == BluetoothProfile.STATE_DISCONNECTED) throw IOException("Se cortó la conexión con el empleado.")
                     got = pick(e)
                 }
                 got!!
             }
-        } catch (e: kotlinx.coroutines.TimeoutCancellationException) { throw IOException("El guardia no respondió ($what).") }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) { throw IOException("El empleado no respondió ($what).") }
 
         val gatt = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) device.connectGatt(context, false, cb, BluetoothDevice.TRANSPORT_LE)
@@ -275,7 +275,7 @@ object RouteDownloader {
                 if (w.status != BluetoothGatt.GATT_SUCCESS) throw IOException("Error al pedir el trozo $i (${w.status}).")
             }
 
-            val info = ShareProtocol.parseInfo(read(infoC)) ?: throw IOException("Datos del guardia no válidos.")
+            val info = ShareProtocol.parseInfo(read(infoC)) ?: throw IOException("Datos del empleado no válidos.")
             val out = java.io.ByteArrayOutputStream(info.size)
             for (i in 0 until info.chunks) {
                 writeIndex(i)
